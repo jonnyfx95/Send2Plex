@@ -1,0 +1,210 @@
+@page "/libreria"
+@rendermode InteractiveServer
+@inject PlexClient Plex
+@inject IOptions<PathSettings> PathsOptions
+@inject NavigationManager Nav
+
+<PageTitle>Send2Plex — Libreria</PageTitle>
+
+<div class="page-container" style="max-width:1400px;">
+    <h1>La tua libreria</h1>
+    <p class="page-lede">Tutto quello che hai già su Plex, direttamente dai dati del server.</p>
+
+    @if (loading)
+    {
+        <p class="page-lede">Carico la libreria da Plex…</p>
+    }
+    else
+    {
+        @if (usingFallback)
+        {
+            <div class="alert alert-info section-gap">⚠️ Plex non raggiungibile in questo momento: mostro l'elenco file dal disco (senza copertine). Riprova più tardi per i dati completi.</div>
+        }
+
+        <div class="tabs section-gap">
+            <button class="tab @(activeTab == "movies" ? "active" : "")" @onclick='() => activeTab = "movies"'>
+                🎬 Film <span class="tab-count">@movies.Count</span>
+            </button>
+            <button class="tab @(activeTab == "tv" ? "active" : "")" @onclick='() => activeTab = "tv"'>
+                📺 Serie TV <span class="tab-count">@series.Count</span>
+            </button>
+        </div>
+
+        <div class="filters-row section-gap">
+            <input class="input" style="max-width:280px" type="text" placeholder="Cerca nella libreria…" @bind="filterText" @bind:event="oninput" />
+            <select class="input" style="max-width:220px" @bind="sortBy">
+                <option value="added">Data aggiunta</option>
+                <option value="name">Nome</option>
+                <option value="year">Anno</option>
+            </select>
+        </div>
+
+        @if (activeTab == "movies")
+        {
+            <section class="library-section">
+                @if (movies.Count == 0)
+                {
+                    <p class="rail-empty" style="padding:0;">Nessun film in libreria.</p>
+                }
+                else if (DisplayedMovies.Count == 0)
+                {
+                    <p class="rail-empty" style="padding:0;">Nessun film corrisponde al filtro.</p>
+                }
+                else
+                {
+                    <div class="library-grid">
+                        @foreach (var item in DisplayedMovies)
+                        {
+                            <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
+                                <div class="card-poster" style="@PosterStyle(item)">
+                                    @if (item.ThumbUrl is null)
+                                    {
+                                        <div class="card-glyph">🎬</div>
+                                    }
+                                    <p class="card-poster-title">@item.Title</p>
+                                </div>
+                                <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
+                            </button>
+                        }
+                    </div>
+                }
+            </section>
+        }
+        else
+        {
+            <section class="library-section">
+                @if (series.Count == 0)
+                {
+                    <p class="rail-empty" style="padding:0;">Nessuna serie in libreria.</p>
+                }
+                else if (DisplayedSeries.Count == 0)
+                {
+                    <p class="rail-empty" style="padding:0;">Nessuna serie corrisponde al filtro.</p>
+                }
+                else
+                {
+                    <div class="library-grid">
+                        @foreach (var item in DisplayedSeries)
+                        {
+                            <button class="card-poster-link" @onclick="() => GoToShow(item)">
+                                <div class="card-poster" style="@PosterStyle(item)">
+                                    @if (item.ThumbUrl is null)
+                                    {
+                                        <div class="card-glyph">📺</div>
+                                    }
+                                    <p class="card-poster-title">@item.Title</p>
+                                </div>
+                                <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
+                            </button>
+                        }
+                    </div>
+                }
+            </section>
+        }
+    }
+</div>
+
+@code {
+    private List<PlexLibraryItem> movies = new();
+    private List<PlexLibraryItem> series = new();
+    private bool loading = true;
+    private bool usingFallback;
+    private string activeTab = "movies";
+    private string filterText = "";
+    private string sortBy = "added";
+
+    private List<PlexLibraryItem> DisplayedMovies => ApplyFilterSort(movies);
+    private List<PlexLibraryItem> DisplayedSeries => ApplyFilterSort(series);
+
+    private List<PlexLibraryItem> ApplyFilterSort(List<PlexLibraryItem> items)
+    {
+        var q = items.AsEnumerable();
+
+        if (!string.IsNullOrWhiteSpace(filterText))
+            q = q.Where(i => i.Title.Contains(filterText, StringComparison.OrdinalIgnoreCase));
+
+        q = sortBy switch
+        {
+            "name" => q.OrderBy(i => i.Title, StringComparer.OrdinalIgnoreCase),
+            "year" => q.OrderByDescending(i => i.Year ?? 0),
+            _ => q.OrderByDescending(i => i.AddedAt) // "added" (default)
+        };
+
+        return q.ToList();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        var moviesTask = Plex.GetAllAsync(toTv: false, CancellationToken.None);
+        var seriesTask = Plex.GetAllAsync(toTv: true, CancellationToken.None);
+        await Task.WhenAll(moviesTask, seriesTask);
+
+        movies = moviesTask.Result;
+        series = seriesTask.Result;
+
+        // Plex non configurato/irraggiungibile (es. token temporaneamente rifiutato):
+        // mostra comunque qualcosa leggendo direttamente le cartelle, come faceva la Home.
+        if (movies.Count == 0 && series.Count == 0)
+        {
+            usingFallback = true;
+            movies = LoadFromFilesystem(toTv: false);
+            series = LoadFromFilesystem(toTv: true);
+        }
+
+        loading = false;
+    }
+
+    private List<PlexLibraryItem> LoadFromFilesystem(bool toTv)
+    {
+        var items = new List<PlexLibraryItem>();
+        var dir = toTv ? PathsOptions.Value.Tv : PathsOptions.Value.Movies;
+        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return items;
+
+        try
+        {
+            if (toTv)
+            {
+                items.AddRange(Directory.GetDirectories(dir).Select(d => new PlexLibraryItem
+                {
+                    Title = Path.GetFileName(d),
+                    IsTv = true,
+                    AddedAt = Directory.GetLastWriteTimeUtc(d)
+                }));
+            }
+            else
+            {
+                items.AddRange(Directory.GetFiles(dir).Select(f => new PlexLibraryItem
+                {
+                    Title = Path.GetFileNameWithoutExtension(f),
+                    IsTv = false,
+                    AddedAt = File.GetLastWriteTimeUtc(f)
+                }));
+            }
+        }
+        catch
+        {
+            // cartella non raggiungibile: la pagina resta comunque utilizzabile senza questa lista
+        }
+
+        return items.OrderBy(i => i.Title, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static string PosterStyle(PlexLibraryItem item) =>
+        item.ThumbUrl is not null
+            ? $"background-image:url('{item.ThumbUrl}')"
+            : "background: linear-gradient(155deg, var(--surface-raised), var(--surface));";
+
+    private void GoToSearch(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return;
+        Nav.NavigateTo($"/cerca?q={Uri.EscapeDataString(title)}");
+    }
+
+    private void GoToShow(PlexLibraryItem item)
+    {
+        var url = $"/serie?title={Uri.EscapeDataString(item.Title)}";
+        if (!string.IsNullOrWhiteSpace(item.RatingKey))
+            url += $"&ratingKey={Uri.EscapeDataString(item.RatingKey)}";
+        Nav.NavigateTo(url);
+    }
+}

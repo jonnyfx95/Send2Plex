@@ -1,0 +1,36 @@
+@rendermode InteractiveServer
+@implements IDisposable
+@inject TelegramWorker Bot
+
+<button class="status-item bot-control" title="@Tooltip" @onclick="Toggle">
+    <span class="status-dot @(Bot.IsPaused ? "off" : "")"></span>
+    Bot@(Bot.IsPaused ? " (in pausa)" : "")
+</button>
+
+<style>
+    .bot-control { background: none; border: none; cursor: pointer; font: inherit; color: inherit; padding: 0; }
+</style>
+
+@code {
+    private string Tooltip => Bot.IsPaused
+        ? $"Bot @{Bot.BotUsername} in pausa — clicca per riprendere"
+        : $"Bot @{Bot.BotUsername} attivo — clicca per mettere in pausa";
+
+    protected override void OnInitialized()
+    {
+        Bot.StatusChanged += OnStatusChanged;
+    }
+
+    private void OnStatusChanged() => InvokeAsync(StateHasChanged);
+
+    private void Toggle()
+    {
+        if (Bot.IsPaused) Bot.Resume();
+        else Bot.Pause();
+    }
+
+    public void Dispose()
+    {
+        Bot.StatusChanged -= OnStatusChanged;
+    }
+}

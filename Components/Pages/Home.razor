@@ -1,0 +1,225 @@
+@page "/"
+@rendermode InteractiveServer
+@inject TmdbClient Tmdb
+@inject PlexClient Plex
+@inject IOptions<PathSettings> PathsOptions
+@inject NavigationManager Nav
+
+<PageTitle>Send2Plex</PageTitle>
+
+<header class="hero">
+    <div class="hero-backdrop" style="@(featured?.BackdropUrl is { } bg ? $"background-image:url('{bg}')" : "")"></div>
+    <div class="hero-content">
+        @if (featured is not null)
+        {
+            <p class="hero-eyebrow">In tendenza questa settimana</p>
+            <h1 class="hero-title">@featured.Title</h1>
+            <div class="hero-meta">
+                @if (featured.Year is not null)
+                {
+                    <span>@featured.Year</span>
+                }
+            </div>
+            @if (!string.IsNullOrWhiteSpace(featured.Overview))
+            {
+                <p class="hero-desc">@featured.Overview</p>
+            }
+            <div class="hero-actions">
+                <button class="btn btn-primary" @onclick="() => GoToSearch(featured.Title)">Cerca questo titolo</button>
+            </div>
+        }
+        else
+        {
+            <p class="hero-eyebrow">Send2Plex</p>
+            <h1 class="hero-title">La tua sala privata</h1>
+            <p class="hero-desc">Configura una API Key TMDB nelle Impostazioni per vedere qui i titoli di tendenza.</p>
+        }
+
+        <form class="searchbar" @onsubmit="() => GoToSearch(query)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+            <input type="text" placeholder="Cerca un film o una serie…" @bind="query" @bind:event="oninput" />
+            <button type="submit" class="btn btn-primary">Cerca</button>
+        </form>
+    </div>
+</header>
+
+<main class="rails">
+
+    <div class="rail">
+        <div class="rail-head">
+            <h2 class="rail-title">Film di tendenza questa settimana</h2>
+            <span class="rail-sub">TMDB</span>
+        </div>
+        @if (trendingMovies.Count == 0)
+        {
+            <p class="rail-empty">Nessun dato disponibile (TMDB non configurato o nessun risultato).</p>
+        }
+        else
+        {
+            <div class="rail-track">
+                @foreach (var item in trendingMovies)
+                {
+                    <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
+                        <div class="card-poster" style="@PosterStyle(item)">
+                            @if (item.PosterUrl is null)
+                            {
+                                <div class="card-glyph">@item.Title[..1]</div>
+                            }
+                            <p class="card-poster-title">@item.Title</p>
+                        </div>
+                        <div class="card-foot"><span>@item.Year</span></div>
+                    </button>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="sprocket"></div>
+
+    <div class="rail">
+        <div class="rail-head">
+            <h2 class="rail-title">Serie TV del momento</h2>
+            <span class="rail-sub">TMDB</span>
+        </div>
+        @if (trendingTv.Count == 0)
+        {
+            <p class="rail-empty">Nessun dato disponibile (TMDB non configurato o nessun risultato).</p>
+        }
+        else
+        {
+            <div class="rail-track">
+                @foreach (var item in trendingTv)
+                {
+                    <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
+                        <div class="card-poster" style="@PosterStyle(item)">
+                            @if (item.PosterUrl is null)
+                            {
+                                <div class="card-glyph">@item.Title[..1]</div>
+                            }
+                            <p class="card-poster-title">@item.Title</p>
+                        </div>
+                        <div class="card-foot"><span>@item.Year</span></div>
+                    </button>
+                }
+            </div>
+        }
+    </div>
+
+    @if (libraryItems.Count > 0)
+    {
+        <div class="sprocket"></div>
+
+        <div class="rail">
+            <div class="rail-head">
+                <h2 class="rail-title">La tua libreria</h2>
+                <a href="/libreria" class="rail-sub" style="text-decoration:underline;">vedi tutta →</a>
+            </div>
+            <div class="rail-track">
+                @foreach (var item in libraryItems)
+                {
+                    <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
+                        <div class="card-poster" style="@(item.ThumbUrl is not null ? $"background-image:url('{item.ThumbUrl}')" : "background: linear-gradient(155deg, var(--surface-raised), var(--surface));")">
+                            @if (item.ThumbUrl is null)
+                            {
+                                <div class="card-glyph">@(item.IsTv ? "📺" : "🎬")</div>
+                            }
+                            <p class="card-poster-title">@item.Title</p>
+                        </div>
+                        <div class="card-foot"><span class="tag-ok">Già in libreria</span></div>
+                    </button>
+                }
+            </div>
+        </div>
+    }
+
+</main>
+
+<footer class="foot">
+    <span>Send2Plex · ricerca personale, nessun contenuto ospitato</span>
+</footer>
+
+@code {
+    private string query = "";
+    private TmdbTrendingItem? featured;
+    private List<TmdbTrendingItem> trendingMovies = new();
+    private List<TmdbTrendingItem> trendingTv = new();
+    private List<PlexLibraryItem> libraryItems = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Tmdb.IsConfigured)
+        {
+            var moviesTask = Tmdb.GetTrendingAsync("movie", CancellationToken.None);
+            var tvTask = Tmdb.GetTrendingAsync("tv", CancellationToken.None);
+            await Task.WhenAll(moviesTask, tvTask);
+
+            trendingMovies = moviesTask.Result.Take(12).ToList();
+            trendingTv = tvTask.Result.Take(12).ToList();
+            featured = trendingMovies.FirstOrDefault(m => m.BackdropUrl is not null) ?? trendingMovies.FirstOrDefault();
+        }
+
+        await LoadLibraryAsync();
+    }
+
+    // Preferisce i dati veri della libreria Plex (poster, titolo pulito); se Plex non è
+    // configurato/raggiungibile, ripiega sull'elenco file/cartelle come prima.
+    private async Task LoadLibraryAsync()
+    {
+        var moviesTask = Plex.GetRecentlyAddedAsync(toTv: false, limit: 6, CancellationToken.None);
+        var tvTask = Plex.GetRecentlyAddedAsync(toTv: true, limit: 6, CancellationToken.None);
+        await Task.WhenAll(moviesTask, tvTask);
+
+        var fromPlex = moviesTask.Result.Concat(tvTask.Result)
+            .OrderByDescending(i => i.AddedAt)
+            .ToList();
+
+        libraryItems = fromPlex.Count > 0 ? fromPlex : LoadLibraryFromFilesystem();
+    }
+
+    private List<PlexLibraryItem> LoadLibraryFromFilesystem()
+    {
+        var items = new List<PlexLibraryItem>();
+        var paths = PathsOptions.Value;
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(paths.Movies) && Directory.Exists(paths.Movies))
+            {
+                items.AddRange(Directory.GetFiles(paths.Movies)
+                    .Select(f => new PlexLibraryItem
+                    {
+                        Title = Path.GetFileNameWithoutExtension(f),
+                        IsTv = false,
+                        AddedAt = File.GetLastWriteTimeUtc(f)
+                    }));
+            }
+            if (!string.IsNullOrWhiteSpace(paths.Tv) && Directory.Exists(paths.Tv))
+            {
+                items.AddRange(Directory.GetDirectories(paths.Tv)
+                    .Select(d => new PlexLibraryItem
+                    {
+                        Title = Path.GetFileName(d),
+                        IsTv = true,
+                        AddedAt = Directory.GetLastWriteTimeUtc(d)
+                    }));
+            }
+        }
+        catch
+        {
+            // cartelle non raggiungibili: la home resta comunque utilizzabile senza questa riga
+        }
+
+        return items.OrderByDescending(i => i.AddedAt).Take(12).ToList();
+    }
+
+    private static string PosterStyle(TmdbTrendingItem item) =>
+        item.PosterUrl is not null
+            ? $"background-image:url('{item.PosterUrl}')"
+            : "background: linear-gradient(155deg, var(--surface-raised), var(--surface));";
+
+    private void GoToSearch(string title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return;
+        Nav.NavigateTo($"/cerca?q={Uri.EscapeDataString(title)}");
+    }
+}

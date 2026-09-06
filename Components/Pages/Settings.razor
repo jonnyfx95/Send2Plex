@@ -1,0 +1,435 @@
+@page "/settings"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject BrowserFetcher BrowserFetcher
+@inject PlexClient Plex
+@inject ConfigStore ConfigStore
+@inject LoginStatusChecker LoginChecker
+@inject TelegramWorker Bot
+
+<PageTitle>Send2Plex — Impostazioni</PageTitle>
+
+<div class="page-container">
+    <h1>Impostazioni</h1>
+    <p class="page-lede">Stato dei servizi collegati, credenziali e siti di ricerca.</p>
+
+    @if (!string.IsNullOrWhiteSpace(saveMessage))
+    {
+        <div class="alert alert-ok section-gap" style="max-width:600px">@saveMessage</div>
+    }
+
+    <div class="tabs section-gap">
+        <button class="tab @(activeTab == "stato" ? "active" : "")" @onclick='() => activeTab = "stato"'>Stato</button>
+        <button class="tab @(activeTab == "servizi" ? "active" : "")" @onclick='() => activeTab = "servizi"'>Servizi collegati</button>
+        <button class="tab @(activeTab == "plex" ? "active" : "")" @onclick='() => activeTab = "plex"'>Librerie Plex</button>
+        <button class="tab @(activeTab == "percorsi" ? "active" : "")" @onclick='() => activeTab = "percorsi"'>Percorsi</button>
+        <button class="tab @(activeTab == "siti" ? "active" : "")" @onclick='() => activeTab = "siti"'>Siti di ricerca</button>
+        <button class="tab @(activeTab == "vpn" ? "active" : "")" @onclick='() => activeTab = "vpn"'>VPN</button>
+        <button class="tab @(activeTab == "login" ? "active" : "")" @onclick='() => activeTab = "login"'>Login siti</button>
+    </div>
+
+    @if (activeTab == "stato")
+    {
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+            <button class="btn btn-ghost btn-sm" disabled="@testingStatus" @onclick="TestStatusAsync">Verifica stato</button>
+            @if (testingStatus)
+            {
+                <span style="color:var(--text-dim); font-size:0.9rem;">Verifico…</span>
+            }
+        </div>
+
+        @if (statusResults is not null)
+        {
+            <div class="panel section-gap" style="max-width:480px; padding:6px 20px;">
+                <div class="status-row"><span>Telegram Bot</span><span>@(statusResults.Value.Results["Telegram"] ? $"✅ @{statusResults.Value.TelegramUser}" : "❌ Errore")</span></div>
+                <div class="status-row"><span>AllDebrid</span><span>@(statusResults.Value.Results["AllDebrid"] ? $"✅ {statusResults.Value.AllDebridUser}" : "❌ Errore")</span></div>
+                <div class="status-row"><span>Plex</span><span>@(statusResults.Value.Results["Plex"] ? "✅ OK" : "❌ Errore")</span></div>
+                <div class="status-row"><span>Percorsi Movies/TV</span><span>@(statusResults.Value.Results["Paths"] ? "✅ OK" : "❌ Errore")</span></div>
+                <div class="status-row"><span>TMDB</span><span>@(string.IsNullOrWhiteSpace(config.Tmdb.ApiKey) ? "⚠️ Non configurato" : "✅ Chiave presente")</span></div>
+            </div>
+        }
+        else
+        {
+            <p class="page-lede">Clicca "Verifica stato" per controllare i servizi collegati.</p>
+        }
+    }
+    else if (activeTab == "servizi")
+    {
+        <div class="panel section-gap" style="max-width:700px; padding:14px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+            <div>
+                <strong>Bot Telegram</strong>
+                <div style="font-size:0.85rem; color:var(--text-dim); margin-top:2px;">
+                    @(Bot.IsPaused ? "⏸️ In pausa — ignora tutti i messaggi tranne /start" : $"✅ Attivo (@{Bot.BotUsername})")
+                </div>
+            </div>
+            <button class="btn @(Bot.IsPaused ? "btn-ok" : "btn-ghost") btn-sm" @onclick="ToggleBot">
+                @(Bot.IsPaused ? "▶️ Riprendi" : "⏸️ Metti in pausa")
+            </button>
+        </div>
+        <p class="page-lede" style="font-size:0.82rem; margin-top:-8px;">Il bot resta sempre in ascolto: "in pausa" significa che ignora ogni comando/messaggio finché non lo riattivi (da qui o con /start su Telegram). I download già avviati non si interrompono. Per cambiare il Bot Token serve invece un riavvio dell'app.</p>
+
+        <div class="grid-2 section-gap" style="max-width:700px">
+            <div class="field" style="grid-column:1 / -1;">
+                <label>Bot Token Telegram</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showBotToken ? "text" : "password")" @bind="config.Telegram.BotToken" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showBotToken = !showBotToken">@(showBotToken ? "🙈" : "👁️")</button>
+                </div>
+            </div>
+            <div class="field" style="grid-column:1 / -1;">
+                <label>Chat ID autorizzati (separati da virgola)</label>
+                <input class="input" value="@string.Join(",", config.Telegram.AllowedChatIds)" @oninput="OnChatIdsChanged" />
+            </div>
+            <div class="field">
+                <label>AllDebrid API Key</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showAllDebridKey ? "text" : "password")" @bind="config.AllDebrid.ApiKey" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showAllDebridKey = !showAllDebridKey">@(showAllDebridKey ? "🙈" : "👁️")</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>TMDB API Key</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showTmdbKey ? "text" : "password")" @bind="config.Tmdb.ApiKey" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showTmdbKey = !showTmdbKey">@(showTmdbKey ? "🙈" : "👁️")</button>
+                </div>
+            </div>
+            <div class="field">
+                <label>Plex Base URL</label>
+                <input class="input" @bind="config.Plex.BaseUrl" />
+            </div>
+            <div class="field">
+                <label>Plex Token</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showPlexToken ? "text" : "password")" @bind="config.Plex.Token" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showPlexToken = !showPlexToken">@(showPlexToken ? "🙈" : "👁️")</button>
+                </div>
+            </div>
+        </div>
+    }
+    else if (activeTab == "plex")
+    {
+        <p class="page-lede">Puoi selezionare più sezioni Plex per Movies e per TV (es. Film + MCU + Star Wars) — vengono unite e trattate come un'unica libreria dall'app.</p>
+        <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+            <button class="btn btn-ghost btn-sm" disabled="@loadingSections" @onclick="LoadSectionsAsync">Carica librerie da Plex</button>
+            @if (loadingSections)
+            {
+                <span style="color:var(--text-dim); font-size:0.9rem;">Carico…</span>
+            }
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(sectionsError))
+        {
+            <div class="alert section-gap" style="max-width:600px">@sectionsError</div>
+        }
+
+        @if (plexSections is { Count: > 0 })
+        {
+            <div class="grid-2 section-gap" style="max-width:700px">
+                <div class="panel" style="padding:6px 20px;">
+                    <strong>Movies</strong>
+                    @foreach (var section in plexSections)
+                    {
+                        <div class="checkbox-row">
+                            <input type="checkbox"
+                                   id="@($"movie-sec-{section.Id}")"
+                                   checked="@config.Plex.MovieSectionIds.Contains(section.Id)"
+                                   @onchange="e => ToggleSection(config.Plex.MovieSectionIds, section.Id, (bool)e.Value!)" />
+                            <label for="@($"movie-sec-{section.Id}")">@section.Title <span style="color:var(--text-dim)">(@section.Type, id @section.Id)</span></label>
+                        </div>
+                    }
+                </div>
+                <div class="panel" style="padding:6px 20px;">
+                    <strong>TV</strong>
+                    @foreach (var section in plexSections)
+                    {
+                        <div class="checkbox-row">
+                            <input type="checkbox"
+                                   id="@($"tv-sec-{section.Id}")"
+                                   checked="@config.Plex.TvSectionIds.Contains(section.Id)"
+                                   @onchange="e => ToggleSection(config.Plex.TvSectionIds, section.Id, (bool)e.Value!)" />
+                            <label for="@($"tv-sec-{section.Id}")">@section.Title <span style="color:var(--text-dim)">(@section.Type, id @section.Id)</span></label>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+    else if (activeTab == "percorsi")
+    {
+        <p class="page-lede">Cartelle di default, usate anche dal bot Telegram.</p>
+        <div class="grid-2 section-gap" style="max-width:700px">
+            <div class="field">
+                <label>Cartella Movies (default)</label>
+                <input class="input" @bind="config.Paths.Movies" />
+            </div>
+            <div class="field">
+                <label>Cartella TV (default)</label>
+                <input class="input" @bind="config.Paths.Tv" />
+            </div>
+        </div>
+
+        @if (plexSections is { Count: > 0 } && (config.Plex.MovieSectionIds.Count > 1 || config.Plex.TvSectionIds.Count > 1))
+        {
+            <h3 class="section-gap" style="margin-bottom:8px;">Cartella per libreria</h3>
+            <p class="page-lede">Hai più librerie Movies e/o TV: puoi dare a ciascuna la propria cartella di destinazione, invece di finire sempre in quella di default. Lascia vuoto per usare il default.</p>
+            <div class="grid-2 section-gap" style="max-width:700px">
+                @foreach (var section in plexSections.Where(s => config.Plex.MovieSectionIds.Contains(s.Id)))
+                {
+                    <div class="field">
+                        <label>🎬 @section.Title</label>
+                        <input class="input" placeholder="@config.Paths.Movies" value="@GetLibraryFolderPath(config.Paths.MovieFolders, section.Id)" @oninput="e => SetLibraryFolderPath(config.Paths.MovieFolders, section.Id, section.Title, e.Value?.ToString())" />
+                    </div>
+                }
+                @foreach (var section in plexSections.Where(s => config.Plex.TvSectionIds.Contains(s.Id)))
+                {
+                    <div class="field">
+                        <label>📺 @section.Title</label>
+                        <input class="input" placeholder="@config.Paths.Tv" value="@GetLibraryFolderPath(config.Paths.TvFolders, section.Id)" @oninput="e => SetLibraryFolderPath(config.Paths.TvFolders, section.Id, section.Title, e.Value?.ToString())" />
+                    </div>
+                }
+            </div>
+        }
+    }
+    else if (activeTab == "siti")
+    {
+        <p class="page-lede">"Richiede VPN": alcuni siti sono raggiungibili solo con la VPN connessa (es. bloccati dal provider) — spuntalo se un sito dà sempre "nessun risultato" a VPN spenta ma funziona a VPN accesa.</p>
+        <table class="data-table section-gap" style="max-width:560px">
+            <thead><tr><th>Sito</th><th>Abilitato</th><th>Richiede VPN</th></tr></thead>
+            <tbody>
+                @foreach (var site in config.TorrentSearch.Sites)
+                {
+                    <tr>
+                        <td data-label="Sito">@site.Name</td>
+                        <td data-label="Abilitato"><input type="checkbox" @bind="site.Enabled" /></td>
+                        <td data-label="Richiede VPN"><input type="checkbox" @bind="site.RequiresVpn" /></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    else if (activeTab == "vpn")
+    {
+        <div class="grid-2 section-gap" style="max-width:700px">
+            <div class="checkbox-row" style="align-self:end;">
+                <input type="checkbox" id="vpnEnabled" @bind="config.Vpn.Enabled" />
+                <label for="vpnEnabled">Gestisci NordVPN in automatico</label>
+            </div>
+            <div class="field">
+                <label>Percorso nordvpn.exe</label>
+                <input class="input" @bind="config.Vpn.NordVpnExePath" />
+            </div>
+        </div>
+    }
+    else if (activeTab == "login")
+    {
+        <p class="page-lede">Alcuni siti richiedono un login manuale per poter cercare. Il click apre una finestra del browser integrato sul PC dove gira l'app — accedi lì, la sessione resta valida tra i riavvii.</p>
+
+        @if (!string.IsNullOrWhiteSpace(loginStatusMessage))
+        {
+            <div class="alert alert-info section-gap">@loginStatusMessage</div>
+        }
+
+        @if (sitesWithLogin.Count == 0)
+        {
+            <p class="page-lede">Nessun sito configurato richiede il login.</p>
+        }
+        else
+        {
+            <div class="panel" style="max-width:600px; padding:6px 20px;">
+                @foreach (var site in sitesWithLogin)
+                {
+                    var state = GetLoginState(site);
+                    <div class="login-row">
+                        <div>
+                            <div>@site.Name</div>
+                            @if (state.Checking)
+                            {
+                                <div style="font-size:0.78rem; color:var(--text-dim);">Verifico…</div>
+                            }
+                            else if (state.Result is not null)
+                            {
+                                <div style="font-size:0.78rem;" title="@state.Result.Detail">@LoginStatusLabel(state.Result.Status)</div>
+                            }
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-ghost btn-sm" disabled="@state.Checking" @onclick="() => CheckLoginStatusAsync(site)">Verifica stato</button>
+                            <button class="btn btn-ghost btn-sm" @onclick="() => OpenLoginAsync(site)">Login nel browser</button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    }
+
+    <div class="section-gap">
+        <button class="btn btn-primary" @onclick="SaveAsync">Salva</button>
+        <p class="page-lede" style="margin-top:14px; font-size:0.85rem;">Le modifiche vengono scritte su <code>appsettings.json</code> e applicate subito, senza riavviare l'app. Unica eccezione: il <strong>Bot Token Telegram</strong>, perché il client è già avviato — per cambiarlo serve un riavvio.</p>
+    </div>
+</div>
+
+<style>
+    .status-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 0.92rem; }
+    .status-row:last-child { border-bottom: none; }
+    .login-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+    .login-row:last-child { border-bottom: none; }
+    .secret-field { position: relative; display: flex; align-items: center; }
+    .secret-field .input { padding-right: 40px; }
+    .eye-btn { position: absolute; right: 6px; background: none; border: none; cursor: pointer; font-size: 0.95rem; padding: 4px 6px; line-height: 1; }
+</style>
+
+@code {
+    private AppConfig config = ConfigManager.LoadConfig();
+    private string activeTab = "stato";
+    private bool testingStatus;
+    private (Dictionary<string, bool> Results, string AllDebridUser, string TelegramUser)? statusResults;
+    private string? saveMessage;
+    private string? loginStatusMessage;
+    private List<PlexSectionInfo>? plexSections;
+    private bool loadingSections;
+    private string? sectionsError;
+
+    private bool showBotToken;
+    private bool showAllDebridKey;
+    private bool showTmdbKey;
+    private bool showPlexToken;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Bot.StatusChanged += OnBotStatusChanged;
+
+        if (!string.IsNullOrWhiteSpace(config.Plex.BaseUrl) && !string.IsNullOrWhiteSpace(config.Plex.Token))
+            await LoadSectionsAsync();
+    }
+
+    private void OnBotStatusChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Bot.StatusChanged -= OnBotStatusChanged;
+    }
+
+    private async Task LoadSectionsAsync()
+    {
+        loadingSections = true;
+        sectionsError = null;
+        try
+        {
+            var sections = await Plex.GetSectionsAsync(CancellationToken.None);
+            if (sections.Count == 0)
+                sectionsError = "⚠️ Nessuna sezione trovata: verifica URL e Token Plex.";
+            plexSections = sections;
+        }
+        finally
+        {
+            loadingSections = false;
+        }
+    }
+
+    private void ToggleSection(List<int> sectionIds, int id, bool isChecked)
+    {
+        if (isChecked && !sectionIds.Contains(id))
+            sectionIds.Add(id);
+        else if (!isChecked)
+            sectionIds.Remove(id);
+    }
+
+    private static string GetLibraryFolderPath(List<LibraryFolder> folders, int sectionId) =>
+        folders.FirstOrDefault(f => f.SectionId == sectionId)?.Path ?? "";
+
+    private static void SetLibraryFolderPath(List<LibraryFolder> folders, int sectionId, string name, string? path)
+    {
+        var existing = folders.FirstOrDefault(f => f.SectionId == sectionId);
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            if (existing is not null) folders.Remove(existing);
+            return;
+        }
+
+        if (existing is not null)
+            existing.Path = path;
+        else
+            folders.Add(new LibraryFolder { SectionId = sectionId, Name = name, Path = path });
+    }
+
+    private List<TorrentSiteConfig> sitesWithLogin =>
+        config.TorrentSearch.Sites.Where(s => !string.IsNullOrWhiteSpace(s.LoginUrl)).ToList();
+
+    private class LoginState
+    {
+        public bool Checking { get; set; }
+        public LoginStatusResult? Result { get; set; }
+    }
+
+    private readonly Dictionary<string, LoginState> loginStates = new();
+
+    private LoginState GetLoginState(TorrentSiteConfig site)
+    {
+        if (!loginStates.TryGetValue(site.Name, out var state))
+        {
+            state = new LoginState();
+            loginStates[site.Name] = state;
+        }
+        return state;
+    }
+
+    private async Task CheckLoginStatusAsync(TorrentSiteConfig site)
+    {
+        var state = GetLoginState(site);
+        state.Checking = true;
+        state.Result = null;
+        try
+        {
+            state.Result = await LoginChecker.CheckAsync(site, config.TorrentSearch.TimeoutSeconds, CancellationToken.None);
+        }
+        finally
+        {
+            state.Checking = false;
+        }
+    }
+
+    private static string LoginStatusLabel(LoginStatus status) => status switch
+    {
+        LoginStatus.LoggedIn => "✅ Loggato",
+        LoginStatus.LoggedOut => "❌ Non loggato",
+        LoginStatus.Error => "⚠️ Errore durante la verifica",
+        _ => "⚠️ Non verificabile"
+    };
+
+    private async Task OpenLoginAsync(TorrentSiteConfig site)
+    {
+        loginStatusMessage = $"Apro la finestra di login per {site.Name}…";
+        await BrowserFetcher.OpenLoginWindowAsync(site.LoginUrl!);
+        loginStatusMessage = $"Finestra di login per {site.Name} aperta sul PC.";
+    }
+
+    private void OnChatIdsChanged(ChangeEventArgs e)
+    {
+        config.Telegram.AllowedChatIds = ConfigManager.StringToChatIds(e.Value?.ToString() ?? "");
+    }
+
+    private void ToggleBot()
+    {
+        if (Bot.IsPaused) Bot.Resume();
+        else Bot.Pause();
+    }
+
+    private async Task TestStatusAsync()
+    {
+        testingStatus = true;
+        try
+        {
+            statusResults = await ConfigTester.TestServicesAsync(config);
+        }
+        finally
+        {
+            testingStatus = false;
+        }
+    }
+
+    private void SaveAsync()
+    {
+        ConfigStore.Update(config);
+        saveMessage = "✅ Configurazione salvata e applicata. Solo il Bot Token Telegram richiede un riavvio dell'app.";
+    }
+}

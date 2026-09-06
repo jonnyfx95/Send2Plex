@@ -1,0 +1,348 @@
+@page "/alldebrid"
+@rendermode InteractiveServer
+@inject AllDebridClient Ad
+@inject Downloader Downloader
+@inject PlexClient Plex
+@inject DownloadOrchestrator Orchestrator
+@inject DownloadQueueService Queue
+
+<PageTitle>Send2Plex — AllDebrid</PageTitle>
+
+<div class="page-container">
+    <h1>AllDebrid</h1>
+    <p class="page-lede">Magnet/torrent attivi sul tuo account, e sblocco diretto di un link da un altro host.</p>
+
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <button class="btn btn-ghost btn-sm" disabled="@loading" @onclick="LoadMagnetsAsync">Aggiorna elenco</button>
+        @if (loading)
+        {
+            <span style="color:var(--text-dim); font-size:0.9rem;">Carico…</span>
+        }
+    </div>
+
+    @if (!string.IsNullOrWhiteSpace(loadError))
+    {
+        <div class="alert alert-error section-gap" style="max-width:700px">@loadError</div>
+    }
+
+    @if (!loading && magnets.Count == 0 && string.IsNullOrWhiteSpace(loadError))
+    {
+        <p class="page-lede">Nessun magnet/torrent attivo sull'account.</p>
+    }
+
+    @if (magnets.Count > 0)
+    {
+        <div style="overflow-x:auto;">
+            <table class="data-table section-gap">
+                <thead>
+                    <tr>
+                        <th>Nome file</th>
+                        <th>Dimensione</th>
+                        <th>Stato</th>
+                        <th>Data upload</th>
+                        <th>Azioni</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var m in magnets)
+                    {
+                        var state = GetRowState(m.Id);
+                        <tr>
+                            <td class="title-cell" data-label="Nome file">@m.Filename</td>
+                            <td data-label="Dimensione">@FormatSize(m.Size)</td>
+                            <td data-label="Stato"><span class="badge @BadgeClass(m.Status)">@m.Status</span></td>
+                            <td data-label="Data upload">@FormatDate(m.UploadDate)</td>
+                            <td class="title-cell" data-label="Azioni">
+                                <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                                    @if (m.IsReady)
+                                    {
+                                        <button type="button" class="btn btn-sm @(state.DestIsTv == "false" ? "btn-primary" : "btn-ghost")" disabled="@state.Busy" @onclick="() => SetRowDestination(state, false)">🎬</button>
+                                        <button type="button" class="btn btn-sm @(state.DestIsTv == "true" ? "btn-primary" : "btn-ghost")" disabled="@state.Busy" @onclick="() => SetRowDestination(state, true)">📺</button>
+                                        @if (OptionsFor(state.DestIsTv).Count > 1)
+                                        {
+                                            <select class="input" style="max-width:160px" value="@state.SectionId" @onchange="e => state.SectionId = int.Parse(e.Value!.ToString()!)">
+                                                @foreach (var s in OptionsFor(state.DestIsTv))
+                                                {
+                                                    <option value="@s.Id">@s.Title</option>
+                                                }
+                                            </select>
+                                        }
+                                        <button class="btn btn-primary btn-sm" disabled="@state.Busy" @onclick="() => DownloadReadyAsync(m, state)">
+                                            @(state.Busy ? "Scarico…" : "Scarica su Plex")
+                                        </button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@state.Busy" title="Aggiungi alla coda invece di scaricare subito" @onclick="() => EnqueueReady(m, state)">➕ Coda</button>
+                                    }
+                                    <button class="btn btn-ghost btn-sm" disabled="@state.Busy" @onclick="() => DeleteAsync(m)">Elimina</button>
+                                </div>
+                                @if (!string.IsNullOrWhiteSpace(state.Message))
+                                {
+                                    <div style="font-size:0.82rem; color:var(--text-dim); margin-top:6px;">@state.Message</div>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    <h3 class="section-gap" style="margin-bottom:16px;">Sblocca un link</h3>
+    <p class="page-lede">Incolla un link da un host supportato da AllDebrid (Rapidgator, Mega, ecc.) per sbloccarlo direttamente, senza passare da una ricerca torrent.</p>
+
+    <div class="panel section-gap" style="max-width:700px; padding:20px;">
+        <div class="field">
+            <label>Link da sbloccare</label>
+            <input class="input" placeholder="https://…" @bind="unlockUrl" @bind:event="oninput" />
+        </div>
+        <button class="btn btn-primary" style="margin-top:12px;" disabled="@(unlocking || string.IsNullOrWhiteSpace(unlockUrl))" @onclick="UnlockAsync">
+            @(unlocking ? "Sblocco…" : "Sblocca")
+        </button>
+
+        @if (!string.IsNullOrWhiteSpace(unlockError))
+        {
+            <div class="alert alert-error section-gap">@unlockError</div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(unlockedLink))
+        {
+            <div class="section-gap">
+                <p style="word-break:break-all;"><strong>Link diretto:</strong> <a href="@unlockedLink" target="_blank" rel="noopener">@unlockedLink</a></p>
+                <div style="display:flex; align-items:center; gap:8px; margin-top:8px; flex-wrap:wrap;">
+                    <button type="button" class="btn btn-sm @(unlockDestIsTv == "false" ? "btn-primary" : "btn-ghost")" disabled="@downloadingUnlocked" @onclick="() => SetUnlockDestination(false)">🎬 Movies</button>
+                    <button type="button" class="btn btn-sm @(unlockDestIsTv == "true" ? "btn-primary" : "btn-ghost")" disabled="@downloadingUnlocked" @onclick="() => SetUnlockDestination(true)">📺 TV</button>
+                    @if (OptionsFor(unlockDestIsTv).Count > 1)
+                    {
+                        <select class="input" style="max-width:200px" value="@unlockSectionId" @onchange="e => unlockSectionId = int.Parse(e.Value!.ToString()!)">
+                            @foreach (var s in OptionsFor(unlockDestIsTv))
+                            {
+                                <option value="@s.Id">@s.Title</option>
+                            }
+                        </select>
+                    }
+                    <button class="btn btn-primary btn-sm" disabled="@downloadingUnlocked" @onclick="DownloadUnlockedAsync">
+                        @(downloadingUnlocked ? "Scarico…" : "Scarica su Plex")
+                    </button>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(unlockDownloadMessage))
+                {
+                    <div style="font-size:0.82rem; color:var(--text-dim); margin-top:6px;">@unlockDownloadMessage</div>
+                }
+            </div>
+        }
+    </div>
+</div>
+
+<style>
+    .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:0.78rem; font-weight:600; }
+    .badge-ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+    .badge-error { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+    .badge-progress { background: var(--accent-soft); color: var(--accent); }
+</style>
+
+@code {
+    private List<MagnetInfo> magnets = new();
+    private readonly Dictionary<string, RowState> rowStates = new();
+    private bool loading;
+    private string? loadError;
+
+    private string unlockUrl = "";
+    private bool unlocking;
+    private string? unlockError;
+    private string? unlockedLink;
+    private string unlockDestIsTv = "false";
+    private int? unlockSectionId;
+    private bool downloadingUnlocked;
+    private string? unlockDownloadMessage;
+
+    private List<PlexSectionInfo> movieSections = new();
+    private List<PlexSectionInfo> tvSections = new();
+
+    private List<PlexSectionInfo> OptionsFor(string destIsTv) => destIsTv == "true" ? tvSections : movieSections;
+
+    private void SetUnlockDestination(bool toTv)
+    {
+        unlockDestIsTv = toTv ? "true" : "false";
+        var options = toTv ? tvSections : movieSections;
+        unlockSectionId = options.Count > 0 ? options[0].Id : null;
+    }
+
+    private class RowState
+    {
+        public string DestIsTv { get; set; } = "false";
+        public int? SectionId { get; set; }
+        public bool Busy { get; set; }
+        public string? Message { get; set; }
+    }
+
+    private void SetRowDestination(RowState state, bool toTv)
+    {
+        state.DestIsTv = toTv ? "true" : "false";
+        var options = toTv ? tvSections : movieSections;
+        state.SectionId = options.Count > 0 ? options[0].Id : null;
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        var (movies, tv) = await Plex.GetConfiguredSectionsAsync(CancellationToken.None);
+        movieSections = movies;
+        tvSections = tv;
+        unlockSectionId = movieSections.Count > 0 ? movieSections[0].Id : null;
+
+        await LoadMagnetsAsync();
+    }
+
+    private RowState GetRowState(string id)
+    {
+        if (!rowStates.TryGetValue(id, out var state))
+        {
+            state = new RowState { SectionId = movieSections.Count > 0 ? movieSections[0].Id : null };
+            rowStates[id] = state;
+        }
+        return state;
+    }
+
+    private async Task LoadMagnetsAsync()
+    {
+        loading = true;
+        loadError = null;
+        try
+        {
+            magnets = await Ad.GetMagnetsAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            loadError = $"❌ Errore caricando l'elenco: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task DeleteAsync(MagnetInfo m)
+    {
+        var state = GetRowState(m.Id);
+        state.Busy = true;
+        state.Message = null;
+        try
+        {
+            await Ad.DeleteMagnetAsync(m.Id, CancellationToken.None);
+            magnets.Remove(m);
+            rowStates.Remove(m.Id);
+        }
+        catch (Exception ex)
+        {
+            state.Message = $"❌ Errore eliminando: {ex.Message}";
+            state.Busy = false;
+        }
+    }
+
+    private async Task DownloadReadyAsync(MagnetInfo m, RowState state)
+    {
+        state.Busy = true;
+        state.Message = "🔍 Recupero elenco file…";
+        try
+        {
+            var toTv = state.DestIsTv == "true";
+            var result = await Orchestrator.DownloadReadyMagnetAsync(
+                m.Id, m.Filename, toTv, "AllDebrid", CancellationToken.None,
+                onStatus: msg => { state.Message = msg; InvokeAsync(StateHasChanged); },
+                sectionId: state.SectionId);
+
+            state.Message = result.Message;
+        }
+        catch (Exception ex)
+        {
+            state.Message = $"❌ Errore durante il download: {ex.Message}";
+        }
+        finally
+        {
+            state.Busy = false;
+        }
+    }
+
+    private void EnqueueReady(MagnetInfo m, RowState state)
+    {
+        Queue.Enqueue(new QueuedDownloadItem
+        {
+            Title = m.Filename,
+            SizeText = FormatSize(m.Size),
+            SourceName = "AllDebrid",
+            ToTv = state.DestIsTv == "true",
+            SectionId = state.SectionId,
+            DestinationLabel = OptionsFor(state.DestIsTv).FirstOrDefault(s => s.Id == state.SectionId)?.Title,
+            MagnetId = m.Id
+        });
+        state.Message = "Aggiunto alla coda";
+    }
+
+    private async Task UnlockAsync()
+    {
+        unlocking = true;
+        unlockError = null;
+        unlockedLink = null;
+        unlockDownloadMessage = null;
+        try
+        {
+            unlockedLink = await Ad.UnlockLinkAsync(unlockUrl.Trim(), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            unlockError = $"❌ Errore sbloccando il link: {ex.Message}";
+        }
+        finally
+        {
+            unlocking = false;
+        }
+    }
+
+    private async Task DownloadUnlockedAsync()
+    {
+        if (string.IsNullOrWhiteSpace(unlockedLink)) return;
+
+        downloadingUnlocked = true;
+        unlockDownloadMessage = "⬇️ Download in corso…";
+        try
+        {
+            var toTv = unlockDestIsTv == "true";
+            await Downloader.SaveOneAsync(unlockedLink, toTv, CancellationToken.None, unlockSectionId);
+            unlockDownloadMessage = await Plex.RefreshAsync(toTv, CancellationToken.None, unlockSectionId)
+                ? "✅ Download completato. 🔄 Plex: aggiornamento avviato."
+                : "✅ Download completato. ⚠️ Refresh Plex non riuscito.";
+        }
+        catch (Exception ex)
+        {
+            unlockDownloadMessage = $"❌ Errore durante il download: {ex.Message}";
+        }
+        finally
+        {
+            downloadingUnlocked = false;
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        double size = bytes;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        int unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return $"{size:0.##} {units[unit]}";
+    }
+
+    private static string FormatDate(long unixSeconds)
+    {
+        if (unixSeconds <= 0) return "-";
+        return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).LocalDateTime.ToString("dd/MM/yyyy HH:mm");
+    }
+
+    private static string BadgeClass(string status) => status.ToLowerInvariant() switch
+    {
+        "ready" => "badge-ok",
+        var s when s.Contains("error") => "badge-error",
+        _ => "badge-progress"
+    };
+}

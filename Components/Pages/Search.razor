@@ -1,0 +1,645 @@
+@page "/cerca"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject TmdbClient Tmdb
+@inject TorrentSearchService TorrentSearch
+@inject ConfigStore ConfigStore
+@inject NordVpnController Vpn
+@inject PlexClient Plex
+@inject DownloadOrchestrator Orchestrator
+@inject DownloadQueueService Queue
+
+<PageTitle>Send2Plex — Cerca</PageTitle>
+
+<div class="page-container">
+    <h1>Cerca</h1>
+    <p class="page-lede">Trova un film o una serie sui siti configurati e scaricalo direttamente su Plex.</p>
+
+    <form class="searchbar section-gap" style="max-width:520px" @onsubmit="SearchQueryAsync">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+        <input type="text" placeholder="Cosa vuoi cercare?" @bind="query" @bind:event="oninput" />
+        <button type="submit" class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(query) || busy)">Cerca</button>
+    </form>
+
+    @if (poster is not null)
+    {
+        <div class="panel section-gap" style="display:flex; gap:20px;">
+            @if (!string.IsNullOrWhiteSpace(poster.PosterUrl))
+            {
+                <img src="@poster.PosterUrl" alt="" style="width:100px; border-radius:6px; flex-shrink:0;" />
+            }
+            <div>
+                <h3>@poster.Title @(poster.Year is not null ? $"({poster.Year})" : "")</h3>
+                @if (poster.MediaType == "movie" && ownedMovie == true)
+                {
+                    <p class="tag-ok" style="margin:4px 0 0;">✅ Già presente nella tua libreria</p>
+                }
+                else if (poster.MediaType == "tv" && ownedEpisodesForShow is { Count: > 0 })
+                {
+                    <p class="tag-ok" style="margin:4px 0 0;">✅ Alcuni episodi sono già nella tua libreria</p>
+                }
+                <p class="page-lede" style="margin-top:8px;">@poster.Overview</p>
+                @if (!string.IsNullOrWhiteSpace(trailerKey))
+                {
+                    @if (showTrailer)
+                    {
+                        <div class="trailer-embed" style="margin-top:12px;">
+                            <iframe width="100%" height="220" src="https://www.youtube-nocookie.com/embed/@trailerKey" title="Trailer" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                        </div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-ghost btn-sm" style="margin-top:12px;" @onclick="() => showTrailer = true">▶️ Guarda trailer</button>
+                    }
+                }
+            </div>
+        </div>
+
+        <div class="dest-toggle section-gap">
+            <span class="dest-label">Salva in</span>
+            <button type="button" class="btn btn-sm @(destinationIsTv == "false" ? "btn-primary" : "btn-ghost")" @onclick="() => SetDestination(false)">🎬 Movies</button>
+            <button type="button" class="btn btn-sm @(destinationIsTv == "true" ? "btn-primary" : "btn-ghost")" @onclick="() => SetDestination(true)">📺 TV</button>
+            @if (CurrentSectionOptions.Count > 1)
+            {
+                <select class="input" style="max-width:200px" value="@selectedSectionId" @onchange="e => selectedSectionId = int.Parse(e.Value!.ToString()!)">
+                    @foreach (var s in CurrentSectionOptions)
+                    {
+                        <option value="@s.Id">@s.Title</option>
+                    }
+                </select>
+            }
+            <span class="dest-hint">rilevato automaticamente da TMDB, correggi se serve</span>
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(statusMessage))
+    {
+        <div class="alert alert-info section-gap">@statusMessage</div>
+    }
+
+    @if (enabledSites.Count > 0 && !awaitingTorrentioInput)
+    {
+        <div class="filters-row section-gap">
+            @foreach (var site in enabledSites)
+            {
+                <button class="btn btn-ghost btn-sm" disabled="@busy" @onclick="() => SelectSiteAsync(site)">@site.Name</button>
+            }
+        </div>
+    }
+
+    @if (awaitingTorrentioInput && torrentioMatch is not null)
+    {
+        <div class="section-gap">
+            <p style="margin-bottom:14px;">📺 <strong>@torrentioMatch.Title</strong> — quale stagione? (prendo tutti gli episodi)</p>
+            @if (loadingSeasons)
+            {
+                <p style="color:var(--text-dim);">Carico le stagioni da TMDB…</p>
+            }
+            else if (torrentioSeasons.Count == 0)
+            {
+                <p style="color:var(--text-dim);">Nessuna stagione trovata su TMDB per questo titolo.</p>
+            }
+            else
+            {
+                <div class="filters-row">
+                    @foreach (var s in torrentioSeasons)
+                    {
+                        <button class="btn btn-ghost" disabled="@busy" @onclick="() => SelectTorrentioSeasonAsync(s)">
+                            @s.Name (@s.EpisodeCount ep.)
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    }
+
+    @if (results is not null)
+    {
+        <h3 class="section-gap" style="margin-bottom:16px;">Risultati (@filteredResults.Count / @results.Count)</h3>
+
+        <div class="filters-row">
+            <select class="input" style="max-width:170px" @bind="filterSeason">
+                <option value="">Tutte le stagioni</option>
+                @foreach (var s in availableSeasons)
+                {
+                    <option value="@s">Stagione @s</option>
+                }
+            </select>
+            <select class="input" style="max-width:170px" @bind="filterResolution">
+                <option value="">Tutte le risoluzioni</option>
+                @foreach (var r in availableResolutions)
+                {
+                    <option value="@r">@r</option>
+                }
+            </select>
+            <select class="input" style="max-width:170px" @bind="filterLanguage">
+                <option value="">Tutte le lingue</option>
+                @foreach (var l in availableLanguages)
+                {
+                    <option value="@l">@l</option>
+                }
+            </select>
+            <select class="input" style="max-width:170px" @bind="filterEpisode">
+                <option value="">Tutti gli episodi</option>
+                @foreach (var e in availableEpisodes)
+                {
+                    <option value="@e">Episodio @e</option>
+                }
+            </select>
+        </div>
+
+        <div style="overflow-x:auto;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Ep.</th>
+                        <th>Titolo</th>
+                        <th>Size</th>
+                        <th>Seed</th>
+                        <th>Fonte</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in filteredResults)
+                    {
+                        var epNum = ParseEpisode(r.Title);
+                        <tr>
+                            <td class="tabular" data-label="Ep.">
+                                @if (epNum is not null && IsEpisodeOwned(epNum.Value))
+                                {
+                                    <span title="Già in libreria">✅ </span>
+                                }
+                                @(epNum?.ToString() ?? "–")
+                            </td>
+                            <td class="title-cell" data-label="Titolo" title="@r.Title">@r.Title</td>
+                            <td class="tabular" data-label="Size">@(r.SizeText ?? "?")</td>
+                            <td class="tabular" data-label="Seed">@(r.SeedsText ?? "?")</td>
+                            <td data-label="Fonte">@(r.SourceListName ?? r.SiteName)</td>
+                            <td data-label="Azione">
+                                @if (downloadingResult == r)
+                                {
+                                    <div class="dl-progress">
+                                        <div class="dl-progress-fill" style="width:@(Math.Max(6, activeDownloadPercent))%"></div>
+                                        <span class="dl-progress-label">@DownloadLabel()</span>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                        <button class="btn btn-ok btn-sm" disabled="@busy" @onclick="() => DownloadAsync(r)">Scarica</button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@busy" title="Aggiungi alla coda invece di scaricare subito" @onclick="() => EnqueueResult(r)">➕ Coda</button>
+                                    </div>
+                                    @if (enqueuedResult == r)
+                                    {
+                                        <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">Aggiunto alla coda</div>
+                                    }
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(downloadResultMessage))
+    {
+        <div class="alert alert-ok" style="margin-top:16px;">@downloadResultMessage</div>
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "q")]
+    private string? QueryFromUrl { get; set; }
+
+    // Arrivo dalla pagina di dettaglio serie (episodio mancante): salta il selettore stagione
+    // e lancia subito la ricerca Torrentio per quella stagione/episodio specifici.
+    [SupplyParameterFromQuery(Name = "season")]
+    private int? SeasonFromUrl { get; set; }
+
+    [SupplyParameterFromQuery(Name = "episode")]
+    private int? EpisodeFromUrl { get; set; }
+
+    private TorrentSearchSettings SearchCfg => ConfigStore.Current.TorrentSearch;
+    private List<TorrentSiteConfig> enabledSites => SearchCfg.Sites
+        .Where(s => s.Enabled)
+        .OrderByDescending(s => s.UseTorrentioApi) // Torrentio (motore di default) sempre per primo
+        .ToList();
+
+    private string query = "";
+    private TmdbPosterInfo? poster;
+    private string? trailerKey;
+    private bool showTrailer;
+    private string? statusMessage;
+    private bool busy;
+
+    private TmdbImdbMatch? torrentioMatch;
+    private TorrentSiteConfig? torrentioSite;
+    private TorrentSiteConfig? selectedSite;
+    private bool awaitingTorrentioInput;
+    private List<TmdbSeasonInfo> torrentioSeasons = new();
+    private bool loadingSeasons;
+
+    private List<TorrentSearchResult>? results;
+    private string filterSeason = "";
+    private string filterResolution = "";
+    private string filterLanguage = "";
+    private string filterEpisode = "";
+    private string destinationIsTv = "false";
+    private List<PlexSectionInfo> movieSections = new();
+    private List<PlexSectionInfo> tvSections = new();
+    private int? selectedSectionId;
+
+    private List<PlexSectionInfo> CurrentSectionOptions => destinationIsTv == "true" ? tvSections : movieSections;
+
+    private void SetDestination(bool toTv)
+    {
+        destinationIsTv = toTv ? "true" : "false";
+        var options = toTv ? tvSections : movieSections;
+        selectedSectionId = options.Count > 0 ? options[0].Id : null;
+    }
+
+    private TorrentSearchResult? downloadingResult;
+    private double activeDownloadPercent;
+    private string? activeDownloadSpeed;
+    private string? downloadResultMessage;
+
+    private bool? ownedMovie;
+    private HashSet<(int Season, int Episode)>? ownedEpisodesForShow;
+    private int? currentSeasonNumber;
+
+    protected override async Task OnInitializedAsync()
+    {
+        ProgressEvents.OnProgressUpdate += OnProgressUpdate;
+        ProgressEvents.OnDownloadComplete += OnDownloadComplete;
+
+        var (movies, tv) = await Plex.GetConfiguredSectionsAsync(CancellationToken.None);
+        movieSections = movies;
+        tvSections = tv;
+        SetDestination(false);
+
+        // Arrivo da un click su un poster in Home (o da un link diretto con ?q=...): precompila
+        // e avvia subito la ricerca, come se l'utente l'avesse scritta a mano.
+        if (!string.IsNullOrWhiteSpace(QueryFromUrl))
+        {
+            query = QueryFromUrl;
+            await SearchQueryAsync();
+        }
+    }
+
+    public void Dispose()
+    {
+        ProgressEvents.OnProgressUpdate -= OnProgressUpdate;
+        ProgressEvents.OnDownloadComplete -= OnDownloadComplete;
+    }
+
+    private void OnProgressUpdate(string fileName, double percent, string speed, string eta)
+    {
+        activeDownloadPercent = percent;
+        activeDownloadSpeed = speed;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnDownloadComplete(string fileName, string destPath)
+    {
+        downloadResultMessage = $"✅ Completato: {fileName} → {destPath}";
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task SearchQueryAsync()
+    {
+        if (string.IsNullOrWhiteSpace(query)) return;
+
+        busy = true;
+        results = null;
+        awaitingTorrentioInput = false;
+        statusMessage = null;
+        ownedMovie = null;
+        ownedEpisodesForShow = null;
+        currentSeasonNumber = null;
+        trailerKey = null;
+        showTrailer = false;
+        try
+        {
+            poster = await Tmdb.SearchPosterAsync(query, CancellationToken.None);
+
+            // Rileva in automatico Movies/TV dal tipo trovato su TMDB, così l'utente non deve
+            // ricordarsi di impostarlo a mano (e rischiare di scaricare nella cartella sbagliata).
+            if (poster is not null && !string.IsNullOrEmpty(poster.MediaType))
+                SetDestination(poster.MediaType == "tv");
+
+            await CheckOwnershipAsync();
+
+            if (poster is not null)
+                trailerKey = await Tmdb.GetTrailerAsync(poster.TmdbId, poster.MediaType == "tv", CancellationToken.None);
+
+            // Torrentio è il motore di default: appena si cerca, parte subito su di lui (se
+            // abilitato) senza dover scegliere il sito a mano. Gli altri siti restano comunque
+            // disponibili come bottoni, per cambiare fonte.
+            var defaultSite = enabledSites.FirstOrDefault(s => s.UseTorrentioApi);
+            if (defaultSite is not null)
+            {
+                await SelectSiteCoreAsync(defaultSite);
+            }
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SelectSiteAsync(TorrentSiteConfig site)
+    {
+        busy = true;
+        statusMessage = null;
+        results = null;
+        awaitingTorrentioInput = false;
+        torrentioSeasons = new();
+        try
+        {
+            await SelectSiteCoreAsync(site);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SelectSiteCoreAsync(TorrentSiteConfig site)
+    {
+        if (site.UseTorrentioApi)
+            {
+                statusMessage = $"🔎 Cerco \"{query}\" su TMDB per Torrentio…";
+                var match = await Tmdb.ResolveImdbIdAsync(query, CancellationToken.None);
+                if (match is null)
+                {
+                    statusMessage = $"❌ Non ho trovato \"{query}\" su TMDB.";
+                    return;
+                }
+
+                if (match.MediaType == "movie")
+                {
+                    statusMessage = null;
+                    await RunSearchAsync(site, () => TorrentSearch.SearchTorrentioApiAsync(site, match.ImdbId, match.MediaType, null, null, SearchCfg.MaxResultsPerSite, CancellationToken.None));
+                }
+                else
+                {
+                    torrentioMatch = match;
+                    torrentioSite = site;
+                    statusMessage = null;
+
+                    loadingSeasons = true;
+                    torrentioSeasons = await Tmdb.GetSeasonsAsync(match.TmdbId, CancellationToken.None);
+                    loadingSeasons = false;
+
+                    // Se arrivo con stagione/episodio già indicati (click su un episodio
+                    // mancante dalla pagina serie), salto il selettore e cerco subito.
+                    var wantedSeason = SeasonFromUrl;
+                    var wantedEpisode = EpisodeFromUrl;
+                    SeasonFromUrl = null;
+                    EpisodeFromUrl = null;
+
+                    var targetSeason = wantedSeason is { } ws ? torrentioSeasons.FirstOrDefault(s => s.SeasonNumber == ws) : null;
+                    if (targetSeason is not null)
+                    {
+                        awaitingTorrentioInput = false;
+                        await SelectTorrentioSeasonAsync(targetSeason);
+                        if (wantedEpisode is { } we)
+                            filterEpisode = we.ToString();
+                    }
+                    else
+                    {
+                        awaitingTorrentioInput = true;
+                    }
+                }
+
+                return;
+            }
+
+            statusMessage = $"🔎 Ricerca \"{query}\" su {site.Name} in corso…";
+            await RunSearchAsync(site, async () =>
+            {
+                if (site.RequiresVpn) await Vpn.ConnectAsync(CancellationToken.None);
+                return await TorrentSearch.SearchSiteAsync(site, query, SearchCfg.TimeoutSeconds, SearchCfg.MaxResultsPerSite, CancellationToken.None);
+            });
+    }
+
+    private async Task SelectTorrentioSeasonAsync(TmdbSeasonInfo chosenSeason)
+    {
+        if (torrentioSite is null || torrentioMatch is null) return;
+
+        busy = true;
+        try
+        {
+            var site = torrentioSite;
+            var match = torrentioMatch;
+            var season = chosenSeason.SeasonNumber;
+            var episodeCount = Math.Max(1, chosenSeason.EpisodeCount);
+            awaitingTorrentioInput = false;
+            currentSeasonNumber = season;
+
+            statusMessage = $"🔎 Cerco su Torrentio {episodeCount} episodi di {chosenSeason.Name}…";
+            await RunSearchAsync(site, async () =>
+            {
+                // Torrentio blocca (403) le richieste che arrivano tutte insieme come raffica:
+                // al massimo 3 episodi alla volta invece di spararli tutti in parallelo.
+                using var throttle = new SemaphoreSlim(3);
+                var perEpisode = await Task.WhenAll(Enumerable.Range(1, episodeCount).Select(async ep =>
+                {
+                    await throttle.WaitAsync();
+                    try
+                    {
+                        return await TorrentSearch.SearchTorrentioApiAsync(site, match.ImdbId, match.MediaType, season, ep, SearchCfg.MaxResultsPerSite, CancellationToken.None);
+                    }
+                    finally
+                    {
+                        throttle.Release();
+                    }
+                }));
+                return perEpisode.SelectMany(r => r).ToList();
+            });
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task RunSearchAsync(TorrentSiteConfig site, Func<Task<List<TorrentSearchResult>>> search)
+    {
+        try
+        {
+            var found = await search();
+            results = found;
+            selectedSite = site;
+            filterSeason = filterResolution = filterEpisode = "";
+            // ITA selezionata di default quando disponibile: la maggior parte delle volte è la lingua cercata.
+            filterLanguage = found.Any(r => ParseLanguage(r.Title) == "ITA") ? "ITA" : "";
+            statusMessage = found.Count == 0 ? $"❌ Nessun risultato trovato su {site.Name}." : null;
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"❌ Errore durante la ricerca: {ex.Message}";
+        }
+    }
+
+    // Controlla se il titolo cercato (film) o la serie sono già presenti su Plex, per avvisare
+    // l'utente prima che scarichi doppioni. Confronto per titolo normalizzato (niente TMDB id
+    // salvato lato Plex): tollera piccole differenze di punteggiatura/maiuscole.
+    private async Task CheckOwnershipAsync()
+    {
+        if (poster is null) return;
+
+        if (poster.MediaType == "movie")
+        {
+            var libMovies = await Plex.GetAllAsync(toTv: false, CancellationToken.None);
+            ownedMovie = libMovies.Any(m => TitlesMatch(m.Title, poster.Title));
+        }
+        else if (poster.MediaType == "tv")
+        {
+            var libShows = await Plex.GetAllAsync(toTv: true, CancellationToken.None);
+            var show = libShows.FirstOrDefault(s => TitlesMatch(s.Title, poster.Title));
+            ownedEpisodesForShow = !string.IsNullOrWhiteSpace(show?.RatingKey)
+                ? (await Plex.GetOwnedEpisodesAsync(show!.RatingKey!, CancellationToken.None)).Select(o => (o.Season, o.Episode)).ToHashSet()
+                : new HashSet<(int, int)>();
+        }
+    }
+
+    private static bool TitlesMatch(string a, string b)
+    {
+        static string Norm(string s) => new string(s.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+        var na = Norm(a);
+        var nb = Norm(b);
+        if (na.Length == 0 || nb.Length == 0) return false;
+        return na == nb || na.Contains(nb) || nb.Contains(na);
+    }
+
+    private bool IsEpisodeOwned(int episode) =>
+        currentSeasonNumber is { } s && ownedEpisodesForShow is not null && ownedEpisodesForShow.Contains((s, episode));
+
+    private string DownloadLabel() =>
+        activeDownloadPercent > 0
+            ? $"{activeDownloadPercent:F0}% · {activeDownloadSpeed}"
+            : "…";
+
+    // --- Parsing (duplicato volutamente da TelegramWorker.cs: progetto separato, stesse regex) ---
+
+    private static (int? Season, string Resolution) ParseSeasonAndResolution(string title)
+    {
+        int? season = null;
+        var seasonMatch = System.Text.RegularExpressions.Regex.Match(title, @"\bS(?:tagione)?\.?\s*(\d{1,2})(?:E\d{1,3})?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (seasonMatch.Success && int.TryParse(seasonMatch.Groups[1].Value, out var s))
+            season = s;
+
+        string resolution =
+            System.Text.RegularExpressions.Regex.IsMatch(title, @"\b(2160p|4K|UHD)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? "4K" :
+            System.Text.RegularExpressions.Regex.IsMatch(title, @"\b1080p\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? "1080p" :
+            System.Text.RegularExpressions.Regex.IsMatch(title, @"\b720p\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? "720p" :
+            System.Text.RegularExpressions.Regex.IsMatch(title, @"\b(480p|SD)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? "SD" :
+            "Altro";
+
+        return (season, resolution);
+    }
+
+    private static string ParseLanguage(string title)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(title, @"\bMULTI\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return "MULTI";
+        if (System.Text.RegularExpressions.Regex.IsMatch(title, @"\b(SUB\.?\s*ITA|ITA\.?\s*SUB)S?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return "SUB ITA";
+        if (System.Text.RegularExpressions.Regex.IsMatch(title, @"\bITA(?:LIAN)?\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return "ITA";
+        return "ENG";
+    }
+
+    private static int? ParseEpisode(string title)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(title, @"\bS\d{1,2}E(\d{1,3})\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return m.Success && int.TryParse(m.Groups[1].Value, out var e) ? e : null;
+    }
+
+    private List<int> availableSeasons => results?
+        .Select(r => ParseSeasonAndResolution(r.Title).Season)
+        .Where(s => s.HasValue).Select(s => s!.Value)
+        .Distinct().OrderBy(s => s).ToList() ?? new();
+
+    private List<string> availableResolutions => results?
+        .Select(r => ParseSeasonAndResolution(r.Title).Resolution)
+        .Distinct().ToList() ?? new();
+
+    private List<string> availableLanguages => results?
+        .Select(r => ParseLanguage(r.Title))
+        .Distinct().ToList() ?? new();
+
+    private List<int> availableEpisodes => results?
+        .Select(r => ParseEpisode(r.Title))
+        .Where(e => e.HasValue).Select(e => e!.Value)
+        .Distinct().OrderBy(e => e).ToList() ?? new();
+
+    private List<TorrentSearchResult> filteredResults
+    {
+        get
+        {
+            if (results is null) return new();
+            var q = results.AsEnumerable();
+            if (!string.IsNullOrEmpty(filterSeason) && int.TryParse(filterSeason, out var s))
+                q = q.Where(r => ParseSeasonAndResolution(r.Title).Season == s);
+            if (!string.IsNullOrEmpty(filterResolution))
+                q = q.Where(r => ParseSeasonAndResolution(r.Title).Resolution == filterResolution);
+            if (!string.IsNullOrEmpty(filterLanguage))
+                q = q.Where(r => ParseLanguage(r.Title) == filterLanguage);
+            if (!string.IsNullOrEmpty(filterEpisode) && int.TryParse(filterEpisode, out var ep))
+                q = q.Where(r => ParseEpisode(r.Title) == ep);
+            return q.OrderBy(r => ParseEpisode(r.Title) ?? int.MaxValue).ToList();
+        }
+    }
+
+    private TorrentSearchResult? enqueuedResult;
+
+    private void EnqueueResult(TorrentSearchResult result)
+    {
+        Queue.Enqueue(new QueuedDownloadItem
+        {
+            Title = result.Title,
+            SizeText = result.SizeText,
+            SourceName = result.SourceListName ?? result.SiteName,
+            ToTv = destinationIsTv == "true",
+            SectionId = selectedSectionId,
+            DestinationLabel = CurrentSectionOptions.FirstOrDefault(s => s.Id == selectedSectionId)?.Title,
+            RequiresVpn = selectedSite?.RequiresVpn == true,
+            TimeoutSeconds = SearchCfg.TimeoutSeconds,
+            SearchResult = result
+        });
+        enqueuedResult = result;
+    }
+
+    private async Task DownloadAsync(TorrentSearchResult result)
+    {
+        busy = true;
+        downloadingResult = result;
+        activeDownloadPercent = 0;
+        downloadResultMessage = null;
+        statusMessage = null;
+        try
+        {
+            var toTv = destinationIsTv == "true";
+
+            var pipelineResult = await Orchestrator.DownloadFromSearchResultAsync(
+                result, selectedSite?.RequiresVpn == true, toTv, SearchCfg.TimeoutSeconds, CancellationToken.None,
+                onStatus: msg => { statusMessage = msg; InvokeAsync(StateHasChanged); },
+                sectionId: selectedSectionId);
+
+            downloadResultMessage = pipelineResult.Message;
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"❌ Errore durante il download: {ex.Message}";
+        }
+        finally
+        {
+            busy = false;
+            downloadingResult = null;
+        }
+    }
+}

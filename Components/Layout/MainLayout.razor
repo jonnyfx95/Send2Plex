@@ -1,0 +1,34 @@
+@inherits LayoutComponentBase
+@inject ConfigStore ConfigStore
+
+<div class="app-shell">
+    <nav class="nav">
+        <a href="/" class="wordmark">Send2Plex<span class="accent-dot">.</span></a>
+        <div class="nav-links">
+            <NavLink href="/" Match="NavLinkMatch.All">Home</NavLink>
+            <NavLink href="/cerca">Cerca</NavLink>
+            <NavLink href="/libreria">Libreria</NavLink>
+            <NavLink href="/alldebrid">AllDebrid</NavLink>
+            <NavLink href="/coda">Coda</NavLink>
+            <NavLink href="/cronologia">Cronologia</NavLink>
+            <NavLink href="/settings">Impostazioni</NavLink>
+        </div>
+        <div class="status-cluster">
+            <QueueBadge />
+            <PlexRefreshButton />
+            <TelegramBotControl />
+            <div class="status-item"><span class="status-dot @(ConfigStore.Current.AllDebrid.ApiKey is { Length: > 0 } ? "" : "off")"></span>AllDebrid</div>
+            <div class="status-item"><span class="status-dot @(ConfigStore.Current.Vpn.Enabled ? "" : "off")"></span>VPN</div>
+        </div>
+    </nav>
+
+    <main class="app-main">
+        @Body
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    Si è verificato un errore imprevisto.
+    <a href="." class="reload">Ricarica</a>
+    <span class="dismiss">🗙</span>
+</div>

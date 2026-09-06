@@ -1,0 +1,30 @@
+@rendermode InteractiveServer
+@implements IDisposable
+@inject DownloadQueueService Queue
+
+@if (Queue.QueuedCount > 0 || Queue.IsRunning)
+{
+    <a href="/coda" class="queue-badge">Coda (@Queue.QueuedCount)</a>
+}
+
+<style>
+    .queue-badge {
+        font-family: "JetBrains Mono", monospace; font-size: 0.72rem; font-weight: 700;
+        background: var(--accent-soft); color: var(--accent); border-radius: 999px;
+        padding: 4px 10px; text-decoration: none;
+    }
+</style>
+
+@code {
+    protected override void OnInitialized()
+    {
+        Queue.Changed += OnChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Queue.Changed -= OnChanged;
+    }
+}

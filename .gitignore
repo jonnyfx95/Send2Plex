@@ -1,0 +1,52 @@
+# ===== Send2Plex — specifico del progetto =====
+
+# Configurazione reale: contiene Bot Token, API key (AllDebrid/TMDB/Plex) e percorsi personali.
+# Cifrate con DPAPI quando il server le riscrive, ma non vanno comunque pubblicate.
+# Vedi README.md per come ricrearlo da zero.
+appsettings.json
+
+# Cronologia download (Punto 10) e profilo browser persistente (cookie di login ai siti,
+# cache WebView2): dati personali/di sessione, non hanno senso in un repo pubblico.
+data/
+WebView2Profile/
+
+# Appunti/analisi di sviluppo interne — non da pubblicare.
+docs/
+
+# Log applicativi (Serilog) e log/trace ad-hoc lasciati da sessioni di sviluppo/debug.
+logs/
+run*.log
+torrent_search_trace.log
+
+# Collegamenti Windows lasciati per sbaglio nella cartella
+*.lnk
+
+# ===== .NET / Visual Studio standard =====
+
+# Build output
+bin/
+obj/
+out/
+
+# Visual Studio cache/opzioni utente
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider / VS Code (se mai usati su questo progetto)
+.idea/
+.vscode/
+
+# File di pubblicazione
+*.pubxml
+*.publishproj
+PublishProfiles/
+
+# ASP.NET Core - segreti utente locali (dotnet user-secrets), se mai usati
+secrets.json
+
+# File temporanei del sistema operativo
+Thumbs.db
+.DS_Store

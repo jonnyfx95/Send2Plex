@@ -1,0 +1,117 @@
+@page "/cronologia"
+@rendermode InteractiveServer
+@inject DownloadHistoryService HistoryService
+
+<PageTitle>Send2Plex — Cronologia</PageTitle>
+
+<div class="page-container">
+    <h1>Cronologia download</h1>
+    <p class="page-lede">Tutto quello che è stato scaricato (o tentato) nel tempo, con le statistiche cumulative.</p>
+
+    @if (loading)
+    {
+        <p class="page-lede">Carico la cronologia…</p>
+    }
+    else
+    {
+        <div class="grid-2 section-gap" style="max-width:700px">
+            <div class="panel" style="padding:16px 20px;">
+                <div style="font-size:0.78rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.04em;">Totale scaricato</div>
+                <div style="font-size:1.6rem; font-weight:700; margin-top:4px;">@totalGb.ToString("0.00") GB</div>
+            </div>
+            <div class="panel" style="padding:16px 20px;">
+                <div style="font-size:0.78rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.04em;">File scaricati</div>
+                <div style="font-size:1.6rem; font-weight:700; margin-top:4px;">@successCount</div>
+            </div>
+        </div>
+
+        <div style="margin: 12px 0 20px;">
+            <input class="input" style="max-width:320px" placeholder="Filtra per titolo o fonte…" @bind="filterText" @bind:event="oninput" />
+        </div>
+
+        @if (filteredEntries.Count == 0)
+        {
+            <p class="page-lede">Nessun download in cronologia.</p>
+        }
+        else
+        {
+            <div style="overflow-x:auto;">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Data</th>
+                            <th>Titolo</th>
+                            <th>Dimensione</th>
+                            <th>Tipo</th>
+                            <th>Fonte</th>
+                            <th>Esito</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var e in filteredEntries)
+                        {
+                            <tr>
+                                <td class="tabular" data-label="Data">@e.When.LocalDateTime.ToString("dd/MM/yyyy HH:mm")</td>
+                                <td class="title-cell" data-label="Titolo" title="@e.Title">@e.Title</td>
+                                <td class="tabular" data-label="Dimensione">@(e.Success ? FormatSize(e.SizeBytes) : "-")</td>
+                                <td data-label="Tipo">@(e.ToTv ? "📺 TV" : "🎬 Movies")</td>
+                                <td data-label="Fonte">@(e.Source ?? "?")</td>
+                                <td data-label="Esito">
+                                    @if (e.Success)
+                                    {
+                                        <span class="tag-ok">✅ OK</span>
+                                    }
+                                    else
+                                    {
+                                        <span title="@e.Error" style="color:var(--critical); font-weight:600;">❌ Fallito</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private bool loading = true;
+    private List<DownloadHistoryEntry> entries = new();
+    private string filterText = "";
+
+    private double totalGb;
+    private int successCount;
+
+    protected override async Task OnInitializedAsync()
+    {
+        entries = await HistoryService.ReadAllAsync();
+        entries = entries.OrderByDescending(e => e.When).ToList();
+
+        successCount = entries.Count(e => e.Success);
+        totalGb = entries.Where(e => e.Success).Sum(e => e.SizeBytes) / 1024.0 / 1024.0 / 1024.0;
+
+        loading = false;
+    }
+
+    private List<DownloadHistoryEntry> filteredEntries =>
+        string.IsNullOrWhiteSpace(filterText)
+            ? entries
+            : entries.Where(e =>
+                e.Title.Contains(filterText, StringComparison.OrdinalIgnoreCase) ||
+                (e.Source?.Contains(filterText, StringComparison.OrdinalIgnoreCase) ?? false))
+              .ToList();
+
+    private static string FormatSize(long bytes)
+    {
+        double size = bytes;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        int unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return $"{size:0.##} {units[unit]}";
+    }
+}

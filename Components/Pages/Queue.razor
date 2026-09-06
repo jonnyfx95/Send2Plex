@@ -1,0 +1,105 @@
+@page "/coda"
+@rendermode InteractiveServer
+@implements IDisposable
+@inject DownloadQueueService QueueSvc
+
+<PageTitle>Send2Plex — Coda</PageTitle>
+
+<div class="page-container">
+    <h1>Coda download</h1>
+    <p class="page-lede">Elementi accodati da Cerca o da AllDebrid — falli partire tutti insieme quando vuoi.</p>
+
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn btn-primary" disabled="@(QueueSvc.IsRunning || QueueSvc.QueuedCount == 0)" @onclick="StartAllAsync">
+            @(QueueSvc.IsRunning ? "In corso…" : "▶️ Avvia tutti")
+        </button>
+        <button class="btn btn-ghost btn-sm" disabled="@QueueSvc.IsRunning" @onclick="() => QueueSvc.ClearCompleted()">Pulisci completati/falliti</button>
+    </div>
+
+    @if (QueueSvc.Items.Count == 0)
+    {
+        <p class="page-lede">La coda è vuota. Aggiungi elementi dalla pagina Cerca o dalla tab AllDebrid.</p>
+    }
+    else
+    {
+        <div style="overflow-x:auto;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Titolo</th>
+                        <th>Size</th>
+                        <th>Fonte</th>
+                        <th>Destinazione</th>
+                        <th>Stato</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var item in QueueSvc.Items)
+                    {
+                        <tr>
+                            <td class="title-cell" data-label="Titolo" title="@item.Title">@item.Title</td>
+                            <td data-label="Size">@(item.SizeText ?? "?")</td>
+                            <td data-label="Fonte">@(item.SourceName ?? "?")</td>
+                            <td data-label="Destinazione">@(item.ToTv ? "📺" : "🎬") @(item.DestinationLabel ?? (item.ToTv ? "TV" : "Movies"))</td>
+                            <td data-label="Stato">
+                                <span class="badge @StatusBadgeClass(item.Status)">@StatusLabel(item.Status)</span>
+                                @if (!string.IsNullOrWhiteSpace(item.Message))
+                                {
+                                    <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">@item.Message</div>
+                                }
+                            </td>
+                            <td data-label="Azioni">
+                                <button class="btn btn-ghost btn-sm" disabled="@(item.Status == QueuedDownloadStatus.Downloading)" @onclick="() => QueueSvc.Remove(item.Id)">Rimuovi</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+<style>
+    .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:0.78rem; font-weight:600; }
+    .badge-ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+    .badge-error { background: color-mix(in srgb, var(--critical) 16%, transparent); color: var(--critical); }
+    .badge-progress { background: var(--accent-soft); color: var(--accent); }
+    .badge-idle { background: var(--border); color: var(--text-dim); }
+</style>
+
+@code {
+    protected override void OnInitialized()
+    {
+        QueueSvc.Changed += OnQueueChanged;
+    }
+
+    private void OnQueueChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task StartAllAsync()
+    {
+        await QueueSvc.StartAllAsync(CancellationToken.None);
+    }
+
+    private static string StatusLabel(QueuedDownloadStatus status) => status switch
+    {
+        QueuedDownloadStatus.Queued => "In coda",
+        QueuedDownloadStatus.Downloading => "In corso",
+        QueuedDownloadStatus.Done => "Completato",
+        QueuedDownloadStatus.Failed => "Errore",
+        _ => status.ToString()
+    };
+
+    private static string StatusBadgeClass(QueuedDownloadStatus status) => status switch
+    {
+        QueuedDownloadStatus.Done => "badge-ok",
+        QueuedDownloadStatus.Failed => "badge-error",
+        QueuedDownloadStatus.Downloading => "badge-progress",
+        _ => "badge-idle"
+    };
+
+    public void Dispose()
+    {
+        QueueSvc.Changed -= OnQueueChanged;
+    }
+}

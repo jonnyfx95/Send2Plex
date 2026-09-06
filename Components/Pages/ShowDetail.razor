@@ -1,0 +1,169 @@
+@page "/serie"
+@rendermode InteractiveServer
+@inject TmdbClient Tmdb
+@inject PlexClient Plex
+@inject NavigationManager Nav
+
+<PageTitle>Send2Plex — @(details?.Name ?? Title ?? "Serie")</PageTitle>
+
+<div class="page-container" style="max-width:1100px;">
+    @if (loading)
+    {
+        <p class="page-lede">Carico le informazioni della serie…</p>
+    }
+    else if (details is null)
+    {
+        <p class="page-lede">Non ho trovato informazioni per "@Title" su TMDB.</p>
+    }
+    else
+    {
+        <div class="panel section-gap" style="display:flex; gap:24px; flex-wrap:wrap;">
+            @if (details.PosterUrl is not null)
+            {
+                <img src="@details.PosterUrl" alt="" style="width:160px; border-radius:8px; flex-shrink:0;" />
+            }
+            <div style="flex:1; min-width:240px;">
+                <h1 style="margin-bottom:6px;">@details.Name @(details.Year is not null ? $"({details.Year})" : "")</h1>
+                <p class="page-lede" style="margin-bottom:0;">@details.Overview</p>
+                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:12px;">
+                    @if (!string.IsNullOrWhiteSpace(themeUrl))
+                    {
+                        <audio controls src="@themeUrl" style="height:32px;">
+                            Il tuo browser non supporta l'elemento audio.
+                        </audio>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(trailerKey) && !showTrailer)
+                    {
+                        <button class="btn btn-ghost btn-sm" @onclick="() => showTrailer = true">▶️ Guarda trailer</button>
+                    }
+                </div>
+                @if (showTrailer && !string.IsNullOrWhiteSpace(trailerKey))
+                {
+                    <div class="trailer-embed" style="margin-top:12px; max-width:560px;">
+                        <iframe width="100%" height="220" src="https://www.youtube-nocookie.com/embed/@trailerKey" title="Trailer" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                    </div>
+                }
+            </div>
+        </div>
+
+        @if (details.Seasons.Count == 0)
+        {
+            <p class="page-lede">Nessuna stagione trovata su TMDB per questa serie.</p>
+        }
+        else
+        {
+            <div class="filters-row section-gap">
+                @foreach (var s in details.Seasons)
+                {
+                    <button class="btn btn-sm @(s.SeasonNumber == selectedSeason ? "btn-primary" : "btn-ghost")" @onclick="() => SelectSeasonAsync(s.SeasonNumber)">@s.Name</button>
+                }
+            </div>
+
+            @if (loadingEpisodes)
+            {
+                <p class="page-lede">Carico episodi…</p>
+            }
+            else if (episodes.Count == 0)
+            {
+                <p class="page-lede">Nessun episodio trovato per questa stagione.</p>
+            }
+            else
+            {
+                <div style="overflow-x:auto;">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Ep.</th>
+                                <th>Titolo</th>
+                                <th>Uscita</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var ep in episodes)
+                            {
+                                var owned = ownedEpisodes.Contains((selectedSeason, ep.EpisodeNumber));
+                                <tr>
+                                    <td class="tabular" data-label="Ep.">@ep.EpisodeNumber</td>
+                                    <td class="title-cell" data-label="Titolo">@ep.Name</td>
+                                    <td class="tabular" data-label="Uscita">@(ep.AirDate ?? "–")</td>
+                                    <td data-label="Azione">
+                                        @if (owned)
+                                        {
+                                            <span class="tag-ok">✅ In libreria</span>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-ok btn-sm" @onclick="() => SearchEpisode(ep.EpisodeNumber)">🔍 Cerca</button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+    }
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "title")] private string? Title { get; set; }
+    [SupplyParameterFromQuery(Name = "ratingKey")] private string? RatingKey { get; set; }
+
+    private TmdbTvDetails? details;
+    private int selectedSeason;
+    private List<TmdbEpisodeInfo> episodes = new();
+    private HashSet<(int Season, int Episode)> ownedEpisodes = new();
+    private bool loading = true;
+    private bool loadingEpisodes;
+    private string? trailerKey;
+    private bool showTrailer;
+    private string? themeUrl;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Title))
+        {
+            loading = false;
+            return;
+        }
+
+        var match = await Tmdb.ResolveImdbIdAsync(Title, CancellationToken.None);
+        if (match is not null && match.MediaType == "tv")
+        {
+            details = await Tmdb.GetTvDetailsAsync(match.TmdbId, CancellationToken.None);
+            trailerKey = await Tmdb.GetTrailerAsync(match.TmdbId, isTv: true, CancellationToken.None);
+        }
+
+        if (!string.IsNullOrWhiteSpace(RatingKey))
+        {
+            var owned = await Plex.GetOwnedEpisodesAsync(RatingKey, CancellationToken.None);
+            ownedEpisodes = owned.Select(o => (o.Season, o.Episode)).ToHashSet();
+            themeUrl = await Plex.GetShowThemeUrlAsync(RatingKey, CancellationToken.None);
+        }
+
+        loading = false;
+
+        if (details is { Seasons.Count: > 0 })
+        {
+            await SelectSeasonAsync(details.Seasons[0].SeasonNumber);
+        }
+    }
+
+    private async Task SelectSeasonAsync(int season)
+    {
+        if (details is null) return;
+
+        selectedSeason = season;
+        loadingEpisodes = true;
+        episodes = await Tmdb.GetSeasonEpisodesAsync(details.TmdbId, season, CancellationToken.None);
+        loadingEpisodes = false;
+    }
+
+    private void SearchEpisode(int episode)
+    {
+        var q = details?.Name ?? Title ?? "";
+        Nav.NavigateTo($"/cerca?q={Uri.EscapeDataString(q)}&season={selectedSeason}&episode={episode}");
+    }
+}
