@@ -1,0 +1,52 @@
+@rendermode InteractiveServer
+@implements IDisposable
+@inject NordVpnController Vpn
+
+<button class="status-item vpn-control" disabled="@(!Vpn.IsConfigured || busy)" title="@Tooltip" @onclick="Toggle">
+    <span class="status-dot @(Vpn.IsConnected ? "" : "off")"></span>
+    VPN@(busy ? " (attendo…)" : Vpn.IsConnected ? " (connessa)" : "")
+</button>
+
+<style>
+    .vpn-control { background: none; border: none; cursor: pointer; font: inherit; color: inherit; padding: 0; }
+    .vpn-control:disabled { cursor: default; opacity: 0.6; }
+</style>
+
+@code {
+    private bool busy;
+
+    private string Tooltip => !Vpn.IsConfigured
+        ? "nordvpn.exe non configurato — impostalo in Impostazioni"
+        : busy
+            ? "Sto cambiando lo stato della VPN…"
+            : Vpn.IsConnected
+                ? "NordVPN connessa — clicca per disconnettere"
+                : "NordVPN disconnessa — clicca per connettere";
+
+    protected override void OnInitialized()
+    {
+        Vpn.StatusChanged += OnStatusChanged;
+    }
+
+    private void OnStatusChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task Toggle()
+    {
+        if (!Vpn.IsConfigured || busy) return;
+
+        busy = true;
+        try
+        {
+            await Vpn.ManualToggleAsync(CancellationToken.None);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        Vpn.StatusChanged -= OnStatusChanged;
+    }
+}

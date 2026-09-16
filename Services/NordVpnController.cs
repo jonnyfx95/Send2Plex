@@ -32,7 +32,37 @@ public class NordVpnController
     /// <summary>True se la gestione automatica è attiva in configurazione (indipendentemente dal file .exe).</summary>
     public bool IsEnabled => _cfg.Enabled;
 
-    private bool IsUsable => _cfg.Enabled && !string.IsNullOrWhiteSpace(_cfg.NordVpnExePath) && File.Exists(_cfg.NordVpnExePath);
+    /// <summary>True se nordvpn.exe è configurato e trovato — indipendente da <see cref="IsEnabled"/>,
+    /// serve per lo switch manuale in UI che deve funzionare anche a gestione automatica disattivata.</summary>
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(_cfg.NordVpnExePath) && File.Exists(_cfg.NordVpnExePath);
+
+    /// <summary>Stato live dell'adattatore NordLynx, per mostrare connesso/disconnesso in UI.</summary>
+    public bool IsConnected => IsInterfaceUp();
+
+    /// <summary>Notificato dopo ogni tentativo di connessione/disconnessione (manuale o automatico),
+    /// così lo switch in UI resta sincronizzato anche quando è una ricerca/download a muovere la VPN.</summary>
+    public event Action? StatusChanged;
+
+    private bool IsUsable => _cfg.Enabled && IsConfigured;
+
+    /// <summary>Connette la VPN per un uso automatico interno (ricerca su un sito che la richiede):
+    /// no-op se la gestione automatica è disattivata in Impostazioni.</summary>
+    public Task<bool> ConnectAsync(CancellationToken ct) => IsUsable ? ConnectCoreAsync(ct) : Task.FromResult(true);
+
+    /// <summary>Disconnette la VPN per un uso automatico interno (prima di un download):
+    /// no-op se la gestione automatica è disattivata in Impostazioni.</summary>
+    public Task<bool> DisconnectAsync(CancellationToken ct) => IsUsable ? DisconnectCoreAsync(ct) : Task.FromResult(true);
+
+    /// <summary>
+    /// Accende/spegne la VPN su comando esplicito dell'utente (switch in barra in alto):
+    /// funziona anche se la gestione automatica (VpnSettings.Enabled) è disattivata, perché qui
+    /// è l'utente stesso a decidere — richiede solo che nordvpn.exe sia configurato e trovato.
+    /// </summary>
+    public Task<bool> ManualToggleAsync(CancellationToken ct)
+    {
+        if (!IsConfigured) return Task.FromResult(false);
+        return IsConnected ? DisconnectCoreAsync(ct) : ConnectCoreAsync(ct);
+    }
 
     /// <summary>
     /// Connette la VPN e attende una verifica REALE di connettività (non solo lo stato
@@ -40,10 +70,8 @@ public class NordVpnController
     /// prima che il tunnel instradi davvero il traffico, e partire subito con la ricerca
     /// in quella finestra produce falsi "nessun risultato".
     /// </summary>
-    public async Task<bool> ConnectAsync(CancellationToken ct)
+    private async Task<bool> ConnectCoreAsync(CancellationToken ct)
     {
-        if (!IsUsable) return true;
-
         await _lock.WaitAsync(ct);
         try
         {
@@ -85,13 +113,12 @@ public class NordVpnController
         finally
         {
             _lock.Release();
+            StatusChanged?.Invoke();
         }
     }
 
-    public async Task<bool> DisconnectAsync(CancellationToken ct)
+    private async Task<bool> DisconnectCoreAsync(CancellationToken ct)
     {
-        if (!IsUsable) return true;
-
         await _lock.WaitAsync(ct);
         try
         {
@@ -131,6 +158,7 @@ public class NordVpnController
         finally
         {
             _lock.Release();
+            StatusChanged?.Invoke();
         }
     }
 

@@ -1,16 +1,24 @@
 @page "/alldebrid"
 @rendermode InteractiveServer
-@inject AllDebridClient Ad
+@inject DebridProviderFactory DebridFactory
+@inject ConfigStore ConfigStore
 @inject Downloader Downloader
 @inject PlexClient Plex
 @inject DownloadOrchestrator Orchestrator
 @inject DownloadQueueService Queue
+@inject NavigationManager Nav
 
 <PageTitle>Send2Plex — AllDebrid</PageTitle>
 
 <div class="page-container">
     <h1>AllDebrid</h1>
     <p class="page-lede">Magnet/torrent attivi sul tuo account, e sblocco diretto di un link da un altro host.</p>
+
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px;">
+        <button type="button" class="btn btn-sm @(activeProvider == DebridProvider.AllDebrid ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick="() => SwitchProviderAsync(DebridProvider.AllDebrid)"><img src="/img/provider/alldebrid.png" alt="" style="width:18px; height:18px; object-fit:contain;" />AllDebrid</button>
+        <button type="button" class="btn btn-sm @(activeProvider == DebridProvider.RealDebrid ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick="() => SwitchProviderAsync(DebridProvider.RealDebrid)"><img src="/img/provider/realdebrid.png" alt="" style="width:18px; height:18px; object-fit:contain;" />Real-Debrid</button>
+        <button type="button" class="btn btn-sm @(activeProvider == DebridProvider.Premiumize ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick="() => SwitchProviderAsync(DebridProvider.Premiumize)"><img src="/img/provider/premiumizeme.png" alt="" style="width:18px; height:18px; object-fit:contain;" />Premiumize</button>
+    </div>
 
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
         <button class="btn btn-ghost btn-sm" disabled="@loading" @onclick="LoadMagnetsAsync">Aggiorna elenco</button>
@@ -71,9 +79,54 @@
                                             @(state.Busy ? "Scarico…" : "Scarica su Plex")
                                         </button>
                                         <button class="btn btn-ghost btn-sm" disabled="@state.Busy" title="Aggiungi alla coda invece di scaricare subito" @onclick="() => EnqueueReady(m, state)">➕ Coda</button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@state.Busy" title="Guarda subito in streaming, senza scaricare su disco" @onclick="() => WatchAsync(m, state)">▶️ Guarda in streaming</button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@state.Busy" title="Scegli quali file scaricare invece di tutti" @onclick="() => ToggleFilesAsync(m, state)">
+                                            @(state.ShowFiles ? "📄 Nascondi file" : "📄 Scegli file")
+                                        </button>
                                     }
                                     <button class="btn btn-ghost btn-sm" disabled="@state.Busy" @onclick="() => DeleteAsync(m)">Elimina</button>
                                 </div>
+                                @if (state.Busy && state.Percent > 0)
+                                {
+                                    <div class="dl-progress" style="margin-top:8px; max-width:260px;">
+                                        <div class="dl-progress-fill" style="width:@(Math.Max(6, state.Percent))%"></div>
+                                        <span class="dl-progress-label">@state.Percent.ToString("F0")% · @state.Speed</span>
+                                    </div>
+                                    <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">
+                                        File @state.CurrentFileIndex/@state.TotalFiles — ETA @state.Eta
+                                        @if (!string.IsNullOrWhiteSpace(state.CurrentFileName))
+                                        {
+                                            <span title="@state.CurrentFileName">— @Truncate(state.CurrentFileName, 30)</span>
+                                        }
+                                    </div>
+                                }
+                                @if (state.ShowFiles)
+                                {
+                                    <div class="panel" style="margin-top:8px; padding:8px 14px; max-width:420px;">
+                                        @if (state.LoadingFiles)
+                                        {
+                                            <span style="font-size:0.82rem; color:var(--text-dim);">Carico elenco file…</span>
+                                        }
+                                        else if (state.Files is { Count: 0 })
+                                        {
+                                            <span style="font-size:0.82rem; color:var(--text-dim);">Nessun file trovato.</span>
+                                        }
+                                        else if (state.Files is not null)
+                                        {
+                                            @foreach (var f in state.Files)
+                                            {
+                                                <div class="checkbox-row" style="font-size:0.85rem;">
+                                                    <input type="checkbox"
+                                                           id="@($"file-{m.Id}-{f.Link.GetHashCode()}")"
+                                                           checked="@state.SelectedLinks.Contains(f.Link)"
+                                                           @onchange="e => ToggleFileSelection(state, f.Link, (bool)e.Value!)" />
+                                                    <label for="@($"file-{m.Id}-{f.Link.GetHashCode()}")" title="@f.Name">@Truncate(f.Name, 44) <span style="color:var(--text-dim)">(@FormatSize(f.Size))</span></label>
+                                                    <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 8px;" title="Guarda questo file in streaming" @onclick="() => NavigateToWatch(f, f.Name)">▶️</button>
+                                                </div>
+                                            }
+                                        }
+                                    </div>
+                                }
                                 @if (!string.IsNullOrWhiteSpace(state.Message))
                                 {
                                     <div style="font-size:0.82rem; color:var(--text-dim); margin-top:6px;">@state.Message</div>
@@ -123,6 +176,13 @@
                         @(downloadingUnlocked ? "Scarico…" : "Scarica su Plex")
                     </button>
                 </div>
+                @if (downloadingUnlocked && unlockDownloadPercent > 0)
+                {
+                    <div class="dl-progress" style="margin-top:8px; max-width:260px;">
+                        <div class="dl-progress-fill" style="width:@(Math.Max(6, unlockDownloadPercent))%"></div>
+                        <span class="dl-progress-label">@unlockDownloadPercent.ToString("F0")% · @unlockDownloadSpeed</span>
+                    </div>
+                }
                 @if (!string.IsNullOrWhiteSpace(unlockDownloadMessage))
                 {
                     <div style="font-size:0.82rem; color:var(--text-dim); margin-top:6px;">@unlockDownloadMessage</div>
@@ -140,6 +200,20 @@
 </style>
 
 @code {
+    // Tab AllDebrid/Real-Debrid (vedi piano-multi-provider-debrid.md): cambia quale IDebridClient
+    // risolvono TUTTE le chiamate esistenti sotto (Ad.*), ricaricando l'elenco magnet al cambio.
+    private DebridProvider activeProvider = DebridProvider.AllDebrid;
+    private IDebridClient Ad => DebridFactory.Get(activeProvider);
+
+    private async Task SwitchProviderAsync(DebridProvider provider)
+    {
+        if (activeProvider == provider) return;
+        activeProvider = provider;
+        rowStates.Clear();
+        magnets.Clear();
+        await LoadMagnetsAsync();
+    }
+
     private List<MagnetInfo> magnets = new();
     private readonly Dictionary<string, RowState> rowStates = new();
     private bool loading;
@@ -153,6 +227,8 @@
     private int? unlockSectionId;
     private bool downloadingUnlocked;
     private string? unlockDownloadMessage;
+    private double unlockDownloadPercent;
+    private string? unlockDownloadSpeed;
 
     private List<PlexSectionInfo> movieSections = new();
     private List<PlexSectionInfo> tvSections = new();
@@ -172,7 +248,22 @@
         public int? SectionId { get; set; }
         public bool Busy { get; set; }
         public string? Message { get; set; }
+        public double Percent { get; set; }
+        public string? Speed { get; set; }
+        public string? Eta { get; set; }
+        public string? CurrentFileName { get; set; }
+        public int CurrentFileIndex { get; set; }
+        public int TotalFiles { get; set; }
+
+        // Selezione file (null finché l'utente non apre "Scegli file" — a quel punto tutti i
+        // file vengono selezionati di default, l'utente ne può deselezionare alcuni).
+        public bool ShowFiles { get; set; }
+        public bool LoadingFiles { get; set; }
+        public List<MagnetFile>? Files { get; set; }
+        public HashSet<string> SelectedLinks { get; set; } = new();
     }
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
     private void SetRowDestination(RowState state, bool toTv)
     {
@@ -183,6 +274,8 @@
 
     protected override async Task OnInitializedAsync()
     {
+        activeProvider = ConfigStore.Current.General.PreferredDebridProvider;
+
         var (movies, tv) = await Plex.GetConfiguredSectionsAsync(CancellationToken.None);
         movieSections = movies;
         tvSections = tv;
@@ -237,17 +330,113 @@
         }
     }
 
+    private async Task ToggleFilesAsync(MagnetInfo m, RowState state)
+    {
+        if (state.ShowFiles)
+        {
+            state.ShowFiles = false;
+            return;
+        }
+
+        state.ShowFiles = true;
+        if (state.Files is null)
+        {
+            state.LoadingFiles = true;
+            try
+            {
+                state.Files = await Ad.GetMagnetFilesDetailedAsync(m.Id, CancellationToken.None);
+                state.SelectedLinks = state.Files.Select(f => f.Link).ToHashSet();
+            }
+            catch (Exception ex)
+            {
+                state.Message = $"❌ Errore recuperando l'elenco file: {ex.Message}";
+                state.Files = new List<MagnetFile>();
+            }
+            finally
+            {
+                state.LoadingFiles = false;
+            }
+        }
+    }
+
+    private void ToggleFileSelection(RowState state, string link, bool isChecked)
+    {
+        if (isChecked) state.SelectedLinks.Add(link);
+        else state.SelectedLinks.Remove(link);
+    }
+
+    // "Guarda in streaming": se il magnet ha un solo file va dritto al player, altrimenti apre
+    // (o lascia aperto) il pannello "Scegli file" così l'utente sceglie quale guardare tramite
+    // il pulsante ▶️ per riga.
+    private async Task WatchAsync(MagnetInfo m, RowState state)
+    {
+        if (state.Files is null)
+        {
+            state.LoadingFiles = true;
+            state.Message = null;
+            try
+            {
+                state.Files = await Ad.GetMagnetFilesDetailedAsync(m.Id, CancellationToken.None);
+                state.SelectedLinks = state.Files.Select(f => f.Link).ToHashSet();
+            }
+            catch (Exception ex)
+            {
+                state.Message = $"❌ Errore recuperando l'elenco file: {ex.Message}";
+                state.Files = new List<MagnetFile>();
+                return;
+            }
+            finally
+            {
+                state.LoadingFiles = false;
+            }
+        }
+
+        if (state.Files.Count == 0)
+        {
+            state.Message = "Nessun file trovato.";
+            return;
+        }
+
+        if (state.Files.Count == 1)
+        {
+            NavigateToWatch(state.Files[0], m.Filename);
+            return;
+        }
+
+        state.ShowFiles = true;
+    }
+
+    private void NavigateToWatch(MagnetFile f, string title) =>
+        Nav.NavigateTo($"/guarda?link={Uri.EscapeDataString(f.Link)}&title={Uri.EscapeDataString(title)}&provider={activeProvider.ToApiValue()}");
+
     private async Task DownloadReadyAsync(MagnetInfo m, RowState state)
     {
         state.Busy = true;
         state.Message = "🔍 Recupero elenco file…";
+        state.Percent = 0;
+        state.Speed = null;
+        state.Eta = null;
+        state.CurrentFileName = null;
         try
         {
             var toTv = state.DestIsTv == "true";
+            var selection = state.Files is not null ? (IReadOnlySet<string>)state.SelectedLinks : null;
             var result = await Orchestrator.DownloadReadyMagnetAsync(
-                m.Id, m.Filename, toTv, "AllDebrid", CancellationToken.None,
+                m.Id, m.Filename, toTv, activeProvider.ToDisplayName(), CancellationToken.None,
                 onStatus: msg => { state.Message = msg; InvokeAsync(StateHasChanged); },
-                sectionId: state.SectionId);
+                sectionId: state.SectionId,
+                onFileProgress: p =>
+                {
+                    state.Percent = p.Percent;
+                    state.Speed = p.Speed;
+                    state.Eta = p.Eta;
+                    state.CurrentFileName = p.FileName;
+                    state.CurrentFileIndex = p.FileIndex;
+                    state.TotalFiles = p.FileCount;
+                    InvokeAsync(StateHasChanged);
+                },
+                selectedFileLinks: selection,
+                provider: activeProvider);
 
             state.Message = result.Message;
         }
@@ -258,6 +447,7 @@
         finally
         {
             state.Busy = false;
+            state.Percent = 0;
         }
     }
 
@@ -267,11 +457,13 @@
         {
             Title = m.Filename,
             SizeText = FormatSize(m.Size),
-            SourceName = "AllDebrid",
+            SourceName = activeProvider.ToDisplayName(),
             ToTv = state.DestIsTv == "true",
             SectionId = state.SectionId,
             DestinationLabel = OptionsFor(state.DestIsTv).FirstOrDefault(s => s.Id == state.SectionId)?.Title,
-            MagnetId = m.Id
+            MagnetId = m.Id,
+            SelectedFileLinks = state.Files is not null ? new HashSet<string>(state.SelectedLinks) : null,
+            Provider = activeProvider
         });
         state.Message = "Aggiunto alla coda";
     }
@@ -302,10 +494,18 @@
 
         downloadingUnlocked = true;
         unlockDownloadMessage = "⬇️ Download in corso…";
+        unlockDownloadPercent = 0;
+        unlockDownloadSpeed = null;
         try
         {
             var toTv = unlockDestIsTv == "true";
-            await Downloader.SaveOneAsync(unlockedLink, toTv, CancellationToken.None, unlockSectionId);
+            await Downloader.SaveOneAsync(unlockedLink, toTv, CancellationToken.None, unlockSectionId,
+                onProgress: (percent, speed, eta) =>
+                {
+                    unlockDownloadPercent = percent;
+                    unlockDownloadSpeed = speed;
+                    InvokeAsync(StateHasChanged);
+                });
             unlockDownloadMessage = await Plex.RefreshAsync(toTv, CancellationToken.None, unlockSectionId)
                 ? "✅ Download completato. 🔄 Plex: aggiornamento avviato."
                 : "✅ Download completato. ⚠️ Refresh Plex non riuscito.";
@@ -317,6 +517,7 @@
         finally
         {
             downloadingUnlocked = false;
+            unlockDownloadPercent = 0;
         }
     }
 

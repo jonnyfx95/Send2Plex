@@ -6,7 +6,7 @@ using SendToPlex.Bot.Models;
 
 namespace SendToPlex.Bot.Services;
 
-public class AllDebridClient
+public class AllDebridClient : IDebridClient
 {
     private readonly IHttpClientFactory _httpFactory;
     private readonly ConfigStore _configStore;
@@ -264,6 +264,18 @@ public class AllDebridClient
                 var status = await GetMagnetStatusValueAsync(id, ct);
                 if (string.Equals(status, "ready", StringComparison.OrdinalIgnoreCase))
                     return true;
+
+                // BUG REALE (attesa di un'ora per un magnet chiaramente morto): senza questo
+                // controllo si aspettava l'intero timeout anche per un torrent segnalato in
+                // errore da AllDebrid (nessun peer, hoster non raggiungibile, ecc.) invece di
+                // fallire subito e notificare l'utente. Stessa stringa già usata per il badge
+                // rosso in AllDebrid.razor (BadgeClass), quindi affidabile: gli stati di errore
+                // di AllDebrid contengono sempre "error" nel testo.
+                if (status.Contains("error", StringComparison.OrdinalIgnoreCase))
+                {
+                    _log.LogError("AllDebrid: magnet {Id} in stato di errore ({Status}), interrotto in anticipo", id, status);
+                    return false;
+                }
             }
             catch (Exception ex) when (IsInvalidIdError(ex))
             {

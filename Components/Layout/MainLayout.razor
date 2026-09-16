@@ -18,7 +18,7 @@
             <PlexRefreshButton />
             <TelegramBotControl />
             <div class="status-item"><span class="status-dot @(ConfigStore.Current.AllDebrid.ApiKey is { Length: > 0 } ? "" : "off")"></span>AllDebrid</div>
-            <div class="status-item"><span class="status-dot @(ConfigStore.Current.Vpn.Enabled ? "" : "off")"></span>VPN</div>
+            <VpnControl />
         </div>
     </nav>
 

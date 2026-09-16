@@ -20,7 +20,7 @@
         <div class="panel section-gap" style="display:flex; gap:24px; flex-wrap:wrap;">
             @if (details.PosterUrl is not null)
             {
-                <img src="@details.PosterUrl" alt="" style="width:160px; border-radius:8px; flex-shrink:0;" />
+                <img src="@details.PosterUrl" alt="" style="width:160px; border-radius:8px; flex-shrink:0; align-self:flex-start;" />
             }
             <div style="flex:1; min-width:240px;">
                 <h1 style="margin-bottom:6px;">@details.Name @(details.Year is not null ? $"({details.Year})" : "")</h1>

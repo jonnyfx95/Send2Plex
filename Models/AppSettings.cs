@@ -17,6 +17,46 @@ public class AllDebridSettings
     public string Agent { get; set; } = "SendToPlexBot";
 }
 
+// Secondo provider debrid (docs/piano-multi-provider-debrid.md), scelto manualmente per singolo
+// file accanto ad AllDebrid — opzionale (pattern IsConfigured di TmdbSettings/OmdbSettings), non
+// richiesta all'avvio come AllDebrid.ApiKey.
+public class RealDebridSettings
+{
+    public string ApiKey { get; set; } = string.Empty;
+}
+
+// Terzo provider debrid (docs/piano-premiumize-libreria.md) — stesso pattern opzionale di
+// RealDebridSettings (IsConfigured, nessuna voce in ValidateConfig). In più rispetto ad
+// AllDebrid/Real-Debrid, Premiumize offre anche uno storage cloud persistente (feature
+// "Acquisisci in libreria", non ancora implementata): questa classe copre solo l'accesso API,
+// non le credenziali WebDAV (customer/pin), che restano un mount OS-level fuori dall'app.
+public class PremiumizeSettings
+{
+    public string ApiKey { get; set; } = string.Empty;
+}
+
+// Retention automatica della feature "Acquisisci in libreria" (docs/piano-premiumize-libreria.md,
+// non ancora implementata) — sezione dedicata invece che dentro GeneralSettings, per stare vicina
+// al campo API key Premiumize nella UI di Impostazioni.
+public class LibrarySettings
+{
+    public int RetentionDays { get; set; } = 30;
+
+    // webOS non ha (e non avrà, per non appesantire la navigazione a telecomando con un
+    // selettore libreria per ogni singolo download) un modo per scegliere la sezione Plex di
+    // destinazione item-per-item come invece fa il web (Search.razor/AllDebrid.razor). Per
+    // "Acquisisci in libreria" da webOS serve comunque sapere QUALE sezione (= quale mount
+    // Premiumize) usare: questi due default, configurati una volta sola sul PC, coprono quel caso.
+    public int? DefaultMovieSectionId { get; set; }
+    public int? DefaultTvSectionId { get; set; }
+
+    // Sfoglio diretto delle cartelle Premiumize organizzate a mano dall'utente sul cloud
+    // (docs/piano-premiumize-libreria.md) — id di cartella presi da premiumize.me, non richiedono
+    // il mount WebDAV: i file restano sul cloud, si guardano tramite sblocco diretto.
+    public string? PremiumizeMovieFolderId { get; set; }
+    public string? PremiumizeTvFolderId { get; set; }
+}
+
 public class PlexSettings
 {
     public string BaseUrl { get; set; } = string.Empty;
@@ -56,11 +96,36 @@ public class GeneralSettings
 {
     public bool StartMinimized { get; set; } = false;
     public bool AutoStartBot { get; set; } = false;
+
+    // Default globale per la scelta provider debrid (Punto 1 della UI ibrida, vedi piano):
+    // pre-seleziona il provider ovunque (Search.razor, AllDebrid.razor, webOS), sovrascrivibile poi
+    // per pagina/riga. "AllDebrid" resta il default per compatibilità con le installazioni esistenti.
+    public DebridProvider PreferredDebridProvider { get; set; } = DebridProvider.AllDebrid;
 }
 
 public class TmdbSettings
 {
     public string ApiKey { get; set; } = string.Empty;
+}
+
+// OMDb (omdbapi.com): unica fonte usata per il voto IMDb vero (TMDB ha un proprio vote_average,
+// diverso da quello IMDb) — serve solo il voto/numero voti, non backdrop/poster (OMDb non li ha in
+// buona qualità, restano da TMDB, già usati per la pagina di dettaglio WebOS).
+public class OmdbSettings
+{
+    public string ApiKey { get; set; } = string.Empty;
+}
+
+public class StreamingSettings
+{
+    // "auto" | "nvenc" | "qsv" | "cpu" — "auto" rileva l'hardware disponibile (NVIDIA -> nvenc,
+    // Intel -> qsv, altrimenti libx264) e ripiega comunque su libx264 se l'encoder scelto
+    // fallisce ad aprirsi (vedi StreamingService).
+    public string Encoder { get; set; } = "auto";
+
+    // "alta" | "media" | "bassa" — vedi StreamingService.QualityPreset per i valori concreti
+    // (cap risoluzione + -cq/-crf) di ciascun livello.
+    public string Quality { get; set; } = "alta";
 }
 
 public class VpnSettings
@@ -92,16 +157,6 @@ public class TorrentSiteConfig
     public bool NeedsDetailPageForMagnet { get; set; }
     public string? MagnetSelectorOnDetailPage { get; set; }
     public string? Cookie { get; set; } // sessione per siti che richiedono login (es. forum privati)
-    public bool UseBrowser { get; set; } // usa un browser reale (WebView2) invece di HttpClient: per siti con Cloudflare/JS
-    public string? LoginUrl { get; set; } // URL da aprire per il login manuale nel browser integrato
-    public string? SearchFormPageUrl { get; set; } // pagina che contiene il form di ricerca (per siti con ricerca via POST)
-    public string? SearchFormFieldName { get; set; } // attributo name del campo di ricerca nel form (es. "search")
-    public string? RevealClickSelector { get; set; } // selettore di un elemento da cliccare sulla pagina di dettaglio prima di leggere il magnet (es. pulsante "Ringrazia")
-
-    // Selettore CSS di un elemento presente solo se l'utente è loggato (es. un link "Logout"),
-    // usato dalla pagina Impostazioni per mostrare lo stato di login (Punto 5). Se vuoto, si usa
-    // un'euristica generica sul testo della pagina (cerca parole come "logout"/"esci").
-    public string? LoggedInIndicatorSelector { get; set; }
     public bool RequiresVpn { get; set; } // se true e Vpn.Enabled, connette NordVPN prima di cercare su questo sito
     public bool UseThePirateBayApi { get; set; } // caso speciale: usa l'API JSON pubblica di apibay.org invece dello scraping HTML
 
@@ -110,9 +165,14 @@ public class TorrentSiteConfig
     // (risolto da TMDB a partire dal titolo) e, per le serie, stagione+episodio specifici.
     public bool UseTorrentioApi { get; set; }
 
+    // Caso speciale: sito specializzato in anime (nyaa.si) — usa il suo feed RSS con parametri di
+    // ricerca invece dello scraping HTML (nessuna API REST ufficiale, ma l'RSS è strutturato e
+    // stabile quanto una vera API).
+    public bool UseNyaaRssApi { get; set; }
+
     // Se true, dopo la scelta di stagione/risoluzione su Telegram viene proposto anche un filtro
     // per lingua (ITA/MULTI/SUB ITA/ENG), dedotto dal titolo. Da disattivare sui siti dove è inutile
-    // perché tutti i contenuti sono già in una sola lingua (es. forum italiani come icv-crew).
+    // perché tutti i contenuti sono già in una sola lingua.
     public bool DetectLanguage { get; set; } = true;
 
     // Numero massimo di pagine da scaricare per una ricerca live. Ha effetto solo se
@@ -161,20 +221,22 @@ public class AppConfig
     public GeneralSettings General { get; set; } = new();
     public TelegramSettings Telegram { get; set; } = new();
     public AllDebridSettings AllDebrid { get; set; } = new();
+    public RealDebridSettings RealDebrid { get; set; } = new();
+    public PremiumizeSettings Premiumize { get; set; } = new();
+    public LibrarySettings Library { get; set; } = new();
     public PlexSettings Plex { get; set; } = new();
     public PathSettings Paths { get; set; } = new();
     public DownloadSettings Download { get; set; } = new();
     public TorrentSearchSettings TorrentSearch { get; set; } = new();
     public VpnSettings Vpn { get; set; } = new();
     public TmdbSettings Tmdb { get; set; } = new();
+    public OmdbSettings Omdb { get; set; } = new();
+    public StreamingSettings Streaming { get; set; } = new();
 }
 
 public static class ConfigManager
 {
-    private static readonly string ConfigPath = Path.Combine(
-        AppDomain.CurrentDomain.BaseDirectory,
-        "appsettings.json"
-    );
+    private static readonly string ConfigPath = AppPaths.ConfigFile;
 
     public static AppConfig LoadConfig()
     {
@@ -205,8 +267,11 @@ public static class ConfigManager
             // I valori legacy in chiaro (file pre-esistenti) passano invariati.
             config.Telegram.BotToken = CredentialProtector.Unprotect(config.Telegram.BotToken);
             config.AllDebrid.ApiKey = CredentialProtector.Unprotect(config.AllDebrid.ApiKey);
+            config.RealDebrid.ApiKey = CredentialProtector.Unprotect(config.RealDebrid.ApiKey);
+            config.Premiumize.ApiKey = CredentialProtector.Unprotect(config.Premiumize.ApiKey);
             config.Plex.Token = CredentialProtector.Unprotect(config.Plex.Token);
             config.Tmdb.ApiKey = CredentialProtector.Unprotect(config.Tmdb.ApiKey);
+            config.Omdb.ApiKey = CredentialProtector.Unprotect(config.Omdb.ApiKey);
 
             return config;
         }
@@ -225,8 +290,11 @@ public static class ConfigManager
             var onDisk = JsonSerializer.Deserialize<AppConfig>(JsonSerializer.Serialize(config)) ?? config;
             onDisk.Telegram.BotToken = CredentialProtector.Protect(config.Telegram.BotToken);
             onDisk.AllDebrid.ApiKey = CredentialProtector.Protect(config.AllDebrid.ApiKey);
+            onDisk.RealDebrid.ApiKey = CredentialProtector.Protect(config.RealDebrid.ApiKey);
+            onDisk.Premiumize.ApiKey = CredentialProtector.Protect(config.Premiumize.ApiKey);
             onDisk.Plex.Token = CredentialProtector.Protect(config.Plex.Token);
             onDisk.Tmdb.ApiKey = CredentialProtector.Protect(config.Tmdb.ApiKey);
+            onDisk.Omdb.ApiKey = CredentialProtector.Protect(config.Omdb.ApiKey);
 
             var json = JsonSerializer.Serialize(onDisk, new JsonSerializerOptions
             {

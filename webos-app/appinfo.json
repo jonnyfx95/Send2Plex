@@ -1,0 +1,13 @@
+{
+  "id": "com.nimbusfx.tv",
+  "version": "1.1.0",
+  "vendor": "NimbusFX",
+  "type": "web",
+  "main": "index.html",
+  "title": "NimbusFX",
+  "icon": "icons/icon-80-v3.png",
+  "largeIcon": "icons/icon-130-v3.png",
+  "resolution": "1920x1080",
+  "iconColor": "#000000",
+  "disableBackHistoryAPI": true
+}

@@ -1115,9 +1115,7 @@ public class TelegramWorker : BackgroundService
                 Title = item.Name,
                 DetailUrl = item.Url,
                 MagnetSelectorOnDetailPage = site.MagnetSelectorOnDetailPage,
-                Cookie = site.Cookie,
-                UseBrowser = site.UseBrowser,
-                RevealClickSelector = site.RevealClickSelector
+                Cookie = site.Cookie
             };
 
             await EnsureVpnConnectedAsync(chatId, site.RequiresVpn, ct);
@@ -1524,8 +1522,7 @@ public class TelegramWorker : BackgroundService
     {
         try
         {
-            var dir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "search_history");
-            Directory.CreateDirectory(dir);
+            var dir = AppPaths.SearchHistory;
 
             var safeName = string.Concat($"{query}_{siteName}".Select(c => char.IsLetterOrDigit(c) ? c : '-'));
             var fileName = $"{DateTime.Now:yyyyMMdd_HHmmss}_{safeName}.json";
@@ -1579,8 +1576,7 @@ public class TelegramWorker : BackgroundService
                 // Tentativo di risoluzione di tutti i magnet dalla pagina di dettaglio
                 // (un topic può contenere più episodi/versioni, non solo il primo trovato).
                 magnets = await _search.ResolveMagnetsFromDetailPageAsync(
-                    result.DetailUrl, result.MagnetSelectorOnDetailPage, result.Cookie, result.UseBrowser,
-                    result.RevealClickSelector, _searchCfg.TimeoutSeconds, ct);
+                    result.DetailUrl, result.MagnetSelectorOnDetailPage, result.Cookie, _searchCfg.TimeoutSeconds, ct);
             }
 
             if (magnets.Count == 0)

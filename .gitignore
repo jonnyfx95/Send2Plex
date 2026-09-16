@@ -1,14 +1,13 @@
 # ===== Send2Plex — specifico del progetto =====
 
 # Configurazione reale: contiene Bot Token, API key (AllDebrid/TMDB/Plex) e percorsi personali.
-# Cifrate con DPAPI quando il server le riscrive, ma non vanno comunque pubblicate.
-# Vedi README.md per come ricrearlo da zero.
+# Cifrate con ASP.NET Core Data Protection quando il server le riscrive, ma non vanno comunque
+# pubblicate. Vedi README.md per come ricrearlo da zero.
 appsettings.json
 
-# Cronologia download (Punto 10) e profilo browser persistente (cookie di login ai siti,
-# cache WebView2): dati personali/di sessione, non hanno senso in un repo pubblico.
+# Cronologia download (Punto 10): dati personali/di sessione, non hanno senso in un repo pubblico.
 data/
-WebView2Profile/
+dp-keys/
 
 # Appunti/analisi di sviluppo interne — non da pubblicare.
 docs/
@@ -50,3 +49,7 @@ secrets.json
 # File temporanei del sistema operativo
 Thumbs.db
 .DS_Store
+
+# Pacchetto .ipk generato da ares-package per l'app di test WebOS (webos-hevc-test/) —
+# rigenerabile in qualsiasi momento, non va versionato.
+webos-hevc-test-build/

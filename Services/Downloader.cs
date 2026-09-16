@@ -18,6 +18,30 @@ public class Downloader
     private PathSettings _paths => _configStore.Current.Paths;
     private DownloadSettings _cfg => _configStore.Current.Download;
 
+    // Limita a MaxParallel i soli trasferimenti effettivi (quello che satura banda/disco).
+    // Ricreato se MaxParallel cambia a caldo da Impostazioni. Deliberatamente NON copre la fase
+    // di risoluzione magnet/attesa "ready" su AllDebrid (può durare fino a un'ora mentre AllDebrid
+    // processa il torrent) — quella fase non consuma risorse locali, quindi più elementi in coda
+    // possono procedere fino a quel punto in parallelo anche con MaxParallel=1, invece di restare
+    // bloccati dietro un singolo magnet lento (vedi coda download).
+    private SemaphoreSlim? _downloadGate;
+    private int _downloadGateSize;
+    private readonly object _gateLock = new();
+
+    private SemaphoreSlim GetDownloadGate()
+    {
+        var desired = Math.Max(1, _cfg.MaxParallel);
+        lock (_gateLock)
+        {
+            if (_downloadGate is null || _downloadGateSize != desired)
+            {
+                _downloadGate = new SemaphoreSlim(desired, desired);
+                _downloadGateSize = desired;
+            }
+            return _downloadGate;
+        }
+    }
+
     // --- Eventi per UI/Telegram ---
     public event Action<string>? DownloadStarted;
     public event Action<string, int, string, string>? DownloadProgress;
@@ -39,7 +63,7 @@ public class Downloader
     /// più librerie, es. Film/MCU/Star Wars, ciascuna con la propria cartella di destinazione).
     /// Ritorna il path completo del file salvato.
     /// </summary>
-    public async Task<(string path, long size)> SaveOneAsync(string url, bool toTv, CancellationToken ct, int? sectionId = null)
+    public async Task<(string path, long size)> SaveOneAsync(string url, bool toTv, CancellationToken ct, int? sectionId = null, Action<double, string, string>? onProgress = null)
     {
         using var http = _httpFactory.CreateClient("DL");
         http.Timeout = TimeSpan.FromMinutes(_cfg.TimeoutMinutes);
@@ -70,6 +94,36 @@ public class Downloader
         // rimasto a metà, lo ritroviamo e riprendiamo il download invece di ripartire da zero.
         var finalPath = Path.Combine(folder, fileName);
         var partPath = finalPath + ".part";
+
+        // BUG REALE (file scaricati corrotti): due download per lo STESSO file avviati vicini nel
+        // tempo (es. utente che tocca "Scarica" due volte sull'app webOS) correvano sullo stesso
+        // .part senza alcuna sincronizzazione. Se il primo veniva cancellato (che elimina il .part,
+        // vedi sotto) nell'istante esatto in cui il secondo leggeva resumeFrom e apriva il file, il
+        // secondo si ritrovava a scrivere in un file NUOVO (quello vecchio era appena sparito) pur
+        // avendo già mandato al server una richiesta Range basata sul vecchio offset — risultato:
+        // un file della dimensione "giusta" per il log ma privo per davvero dei primi N byte reali
+        // (verificato in un caso concreto: il file finale mancava esattamente dei byte del vecchio
+        // offset di ripresa). Il lock per-percorso sotto serializza OGNI accesso allo stesso .part
+        // (lettura di resumeFrom, apertura, cancellazione), eliminando la finestra di race.
+        var pathLock = GetPathLock(partPath);
+        await pathLock.WaitAsync(ct);
+        try
+        {
+            return await SaveOneLockedAsync(http, url, fileName, folder, finalPath, partPath, ct, onProgress);
+        }
+        finally
+        {
+            pathLock.Release();
+        }
+    }
+
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _pathLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    private static SemaphoreSlim GetPathLock(string path) =>
+        _pathLocks.GetOrAdd(Path.GetFullPath(path), _ => new SemaphoreSlim(1, 1));
+
+    private async Task<(string path, long size)> SaveOneLockedAsync(HttpClient http, string url, string fileName, string folder, string finalPath, string partPath, CancellationToken ct, Action<double, string, string>? onProgress)
+    {
         var resumeFrom = File.Exists(partPath) ? new FileInfo(partPath).Length : 0L;
 
         var sw = Stopwatch.StartNew();
@@ -77,6 +131,8 @@ public class Downloader
         var dstPath = finalPath;
         var partFileCreated = false;
 
+        var gate = GetDownloadGate();
+        await gate.WaitAsync(ct);
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -149,7 +205,7 @@ public class Downloader
                 DownloadStarted?.Invoke(Path.GetFileName(finalPath));
                 _log.LogInformation("▶️ Inizio download: {File} → {Path} (ripresa da {Resume:n0} B)", fileName, finalPath, resumeFrom);
 
-                bytesThisAttempt = await CopyWithProgressAsync(input, output, finalPath, totalExpected, resumeFrom, copyCts.Token);
+                bytesThisAttempt = await CopyWithProgressAsync(input, output, finalPath, totalExpected, resumeFrom, copyCts.Token, onProgress);
             }
 
             bytesWritten = resumeFrom + bytesThisAttempt;
@@ -184,6 +240,10 @@ public class Downloader
                 partFileCreated ? " — file parziale mantenuto per un successivo tentativo" : "");
             DownloadCompleted?.Invoke(Path.GetFileName(finalPath), false, ex.Message);
             throw;
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
@@ -249,6 +309,111 @@ public class Downloader
     }
 
     // ---------------------------
+    // Ricerca file già scaricati (app webOS: badge "già presente" + streaming diretto da disco,
+    // vedi TvApiEndpoints "/library/status") — pura IO locale sulle cartelle Movies/TV già note,
+    // nessuna chiamata a Plex: più immediato di un refresh Plex (che è asincrono) e riusa la stessa
+    // convenzione di nomi già applicata da GetTargetFolder/ExtractSeriesName in fase di download.
+    // ---------------------------
+
+    private static readonly string[] VideoExtensions = { ".mkv", ".mp4", ".avi", ".m4v", ".ts", ".mov", ".webm" };
+
+    private static bool IsVideoFile(string path) =>
+        VideoExtensions.Contains(Path.GetExtension(path).ToLowerInvariant());
+
+    // Confronto tollerante (stesso principio di TitlesMatch in Search.razor): solo lettere/numeri,
+    // case-insensitive — un nome file spesso ha punti/trattini al posto degli spazi.
+    private static string NormalizeForMatch(string s) =>
+        new string(s.Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+
+    /// <summary>Cerca un film già scaricato in una qualunque cartella Movies configurata (default +
+    /// per-libreria) il cui nome file contenga il titolo. Torna il percorso completo se trovato.</summary>
+    public string? FindLocalMovieFile(string title)
+    {
+        var norm = NormalizeForMatch(title);
+        if (norm.Length == 0) return null;
+
+        var roots = new[] { _paths.Movies }.Concat(_paths.MovieFolders.Select(f => f.Path))
+            .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p));
+
+        foreach (var root in roots)
+        {
+            var match = Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly)
+                .Where(IsVideoFile)
+                .FirstOrDefault(f => NormalizeForMatch(Path.GetFileNameWithoutExtension(f)).Contains(norm));
+            if (match is not null) return match;
+        }
+        return null;
+    }
+
+    /// <summary>Cerca un episodio già scaricato (cartella serie + pattern SxxExx nel nome file) in
+    /// una qualunque cartella TV configurata. Torna il percorso completo se trovato.</summary>
+    public string? FindLocalEpisodeFile(string seriesTitle, int season, int episode)
+    {
+        var normSeries = NormalizeForMatch(seriesTitle);
+        if (normSeries.Length == 0) return null;
+
+        var pattern = $"S{season:D2}E{episode:D2}";
+        var tvRoots = new[] { _paths.Tv }.Concat(_paths.TvFolders.Select(f => f.Path))
+            .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p));
+
+        foreach (var tvRoot in tvRoots)
+        {
+            var seriesDirs = Directory.EnumerateDirectories(tvRoot)
+                .Where(d => NormalizeForMatch(Path.GetFileName(d)).Contains(normSeries) ||
+                            normSeries.Contains(NormalizeForMatch(Path.GetFileName(d))));
+
+            foreach (var seriesDir in seriesDirs)
+            {
+                var match = Directory.EnumerateFiles(seriesDir, "*", SearchOption.TopDirectoryOnly)
+                    .Where(IsVideoFile)
+                    .FirstOrDefault(f => Path.GetFileName(f).Contains(pattern, StringComparison.OrdinalIgnoreCase));
+                if (match is not null) return match;
+            }
+        }
+        return null;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex SeasonEpisodeRegex =
+        new(@"S(\d{1,2})E(\d{1,3})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>Tutti gli episodi già scaricati per una serie (cartella + pattern SxxExx nel nome
+    /// file), su TUTTE le cartelle TV configurate — usato per il badge "in libreria" della lista
+    /// episodi webOS insieme a (non al posto di) la libreria Plex vera e propria: un refresh Plex
+    /// fallito (bug pre-esistente, capita spesso) non deve far sembrare "non scaricato" un episodio
+    /// che in realtà è già sul disco, solo perché Plex non l'ha ancora indicizzato.</summary>
+    public List<(int Season, int Episode)> FindLocalEpisodes(string seriesTitle)
+    {
+        var normSeries = NormalizeForMatch(seriesTitle);
+        if (normSeries.Length == 0) return new();
+
+        var results = new List<(int, int)>();
+        var tvRoots = new[] { _paths.Tv }.Concat(_paths.TvFolders.Select(f => f.Path))
+            .Where(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p));
+
+        foreach (var tvRoot in tvRoots)
+        {
+            var seriesDirs = Directory.EnumerateDirectories(tvRoot)
+                .Where(d => NormalizeForMatch(Path.GetFileName(d)).Contains(normSeries) ||
+                            normSeries.Contains(NormalizeForMatch(Path.GetFileName(d))));
+
+            foreach (var seriesDir in seriesDirs)
+            {
+                foreach (var file in Directory.EnumerateFiles(seriesDir, "*", SearchOption.TopDirectoryOnly).Where(IsVideoFile))
+                {
+                    var match = SeasonEpisodeRegex.Match(Path.GetFileName(file));
+                    if (match.Success &&
+                        int.TryParse(match.Groups[1].Value, out var s) &&
+                        int.TryParse(match.Groups[2].Value, out var e))
+                    {
+                        results.Add((s, e));
+                    }
+                }
+            }
+        }
+        return results;
+    }
+
+    // ---------------------------
     // Helpers
     // ---------------------------
 
@@ -292,7 +457,7 @@ public class Downloader
         return name.Trim();
     }
 
-    private async Task<long> CopyWithProgressAsync(Stream input, Stream output, string path, long? total, long resumeOffset, CancellationToken ct)
+    private async Task<long> CopyWithProgressAsync(Stream input, Stream output, string path, long? total, long resumeOffset, CancellationToken ct, Action<double, string, string>? onProgress = null)
     {
         var buffer = new byte[1024 * 64];
         long copied = 0;
@@ -339,6 +504,11 @@ public class Downloader
                     FormatSpeed(speed),
                     etaText
                 );
+
+                // Callback diretta (usata dalla coda download): non richiede di far combaciare
+                // il nome file come con il bus statico ProgressEvents, ogni chiamante riceve
+                // solo gli aggiornamenti del proprio download.
+                onProgress?.Invoke(percent, FormatSpeed(speed), etaText);
             }
 
             // log ogni 50MB

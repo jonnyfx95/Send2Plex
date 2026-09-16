@@ -11,7 +11,5 @@ public class TorrentSearchResult
     public long SeedsNumeric { get; set; }
     public string? MagnetSelectorOnDetailPage { get; set; }
     public string? Cookie { get; set; } // ereditato dal sito, serve per ri-risolvere il magnet dalla pagina di dettaglio
-    public bool UseBrowser { get; set; } // ereditato dal sito: usa WebView2 anche per la pagina di dettaglio
-    public string? RevealClickSelector { get; set; } // ereditato dal sito: elemento da cliccare prima di leggere il magnet (es. "Ringrazia")
     public string? SourceListName { get; set; } // nome della pagina indice (lista alfabetica) da cui proviene, se presente
 }

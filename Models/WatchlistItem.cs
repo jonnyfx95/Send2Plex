@@ -1,4 +1,5 @@
 using System.Text.Json;
+using SendToPlex.Bot.Services;
 
 namespace SendToPlex.Bot.Models;
 
@@ -6,7 +7,7 @@ public class WatchlistItem
 {
     public string Name { get; set; } = "";
     public string Url { get; set; } = "";
-    public string SiteName { get; set; } = ""; // per ritrovare Cookie/UseBrowser/selettori del sito al momento del check
+    public string SiteName { get; set; } = ""; // per ritrovare Cookie/selettori del sito al momento del check
 }
 
 /// <summary>
@@ -16,8 +17,7 @@ public class WatchlistItem
 /// </summary>
 public static class WatchlistManager
 {
-    private static readonly string WatchlistPath = Path.Combine(
-        AppDomain.CurrentDomain.BaseDirectory, "watchlist.json");
+    private static readonly string WatchlistPath = AppPaths.LegacyWatchlistFile;
 
     public static List<WatchlistItem> Load()
     {

@@ -2,6 +2,11 @@
 @rendermode InteractiveServer
 @inject PlexClient Plex
 @inject IOptions<PathSettings> PathsOptions
+@inject LibraryAcquisitionService Acquisitions
+@inject WatchHistoryService WatchHistory
+@inject DownloadOrchestrator Orchestrator
+@inject PremiumizeClient Premiumize
+@inject ConfigStore ConfigStore
 @inject NavigationManager Nav
 
 <PageTitle>Send2Plex — Libreria</PageTitle>
@@ -10,101 +15,234 @@
     <h1>La tua libreria</h1>
     <p class="page-lede">Tutto quello che hai già su Plex, direttamente dai dati del server.</p>
 
-    @if (loading)
+    @* Divisione Plex/Premiumize (docs/piano-premiumize-libreria.md): "Plex" è la griglia read-only
+       di sempre; "Premiumize" è la nuova gestione delle acquisizioni in libreria (visione +
+       eliminazione manuale, la stessa logica usata dalla retention automatica). *@
+    <div class="tabs section-gap">
+        <button class="tab @(topSection == "plex" ? "active" : "")" @onclick='() => topSection = "plex"'>📀 Plex</button>
+        <button class="tab @(topSection == "premiumize" ? "active" : "")" @onclick="SwitchToPremiumizeTabAsync">
+            <img src="/img/provider/premiumizeme.png" alt="" style="width:16px; height:16px; object-fit:contain; vertical-align:-3px; margin-right:4px;" />Premiumize
+        </button>
+    </div>
+
+    @if (topSection == "plex")
     {
-        <p class="page-lede">Carico la libreria da Plex…</p>
-    }
-    else
-    {
-        @if (usingFallback)
+        @if (loading)
         {
-            <div class="alert alert-info section-gap">⚠️ Plex non raggiungibile in questo momento: mostro l'elenco file dal disco (senza copertine). Riprova più tardi per i dati completi.</div>
-        }
-
-        <div class="tabs section-gap">
-            <button class="tab @(activeTab == "movies" ? "active" : "")" @onclick='() => activeTab = "movies"'>
-                🎬 Film <span class="tab-count">@movies.Count</span>
-            </button>
-            <button class="tab @(activeTab == "tv" ? "active" : "")" @onclick='() => activeTab = "tv"'>
-                📺 Serie TV <span class="tab-count">@series.Count</span>
-            </button>
-        </div>
-
-        <div class="filters-row section-gap">
-            <input class="input" style="max-width:280px" type="text" placeholder="Cerca nella libreria…" @bind="filterText" @bind:event="oninput" />
-            <select class="input" style="max-width:220px" @bind="sortBy">
-                <option value="added">Data aggiunta</option>
-                <option value="name">Nome</option>
-                <option value="year">Anno</option>
-            </select>
-        </div>
-
-        @if (activeTab == "movies")
-        {
-            <section class="library-section">
-                @if (movies.Count == 0)
-                {
-                    <p class="rail-empty" style="padding:0;">Nessun film in libreria.</p>
-                }
-                else if (DisplayedMovies.Count == 0)
-                {
-                    <p class="rail-empty" style="padding:0;">Nessun film corrisponde al filtro.</p>
-                }
-                else
-                {
-                    <div class="library-grid">
-                        @foreach (var item in DisplayedMovies)
-                        {
-                            <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
-                                <div class="card-poster" style="@PosterStyle(item)">
-                                    @if (item.ThumbUrl is null)
-                                    {
-                                        <div class="card-glyph">🎬</div>
-                                    }
-                                    <p class="card-poster-title">@item.Title</p>
-                                </div>
-                                <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
-                            </button>
-                        }
-                    </div>
-                }
-            </section>
+            <p class="page-lede">Carico la libreria da Plex…</p>
         }
         else
         {
-            <section class="library-section">
-                @if (series.Count == 0)
+            @if (usingFallback)
+            {
+                <div class="alert alert-info section-gap">⚠️ Plex non raggiungibile in questo momento: mostro l'elenco file dal disco (senza copertine). Riprova più tardi per i dati completi.</div>
+            }
+
+            <div class="tabs section-gap">
+                <button class="tab @(activeTab == "movies" ? "active" : "")" @onclick='() => activeTab = "movies"'>
+                    🎬 Film <span class="tab-count">@movies.Count</span>
+                </button>
+                <button class="tab @(activeTab == "tv" ? "active" : "")" @onclick='() => activeTab = "tv"'>
+                    📺 Serie TV <span class="tab-count">@series.Count</span>
+                </button>
+            </div>
+
+            <div class="filters-row section-gap">
+                <input class="input" style="max-width:280px" type="text" placeholder="Cerca nella libreria…" @bind="filterText" @bind:event="oninput" />
+                <select class="input" style="max-width:220px" @bind="sortBy">
+                    <option value="added">Ultima aggiunta</option>
+                    <option value="name">Titolo</option>
+                    <option value="year">Anno</option>
+                </select>
+                <select class="input" style="max-width:220px" @bind="genreFilter">
+                    <option value="">Tutti i generi</option>
+                    @foreach (var genre in CurrentGenres)
+                    {
+                        <option value="@genre">@genre</option>
+                    }
+                </select>
+            </div>
+
+            @if (activeTab == "movies")
+            {
+                <section class="library-section">
+                    @if (movies.Count == 0)
+                    {
+                        <p class="rail-empty" style="padding:0;">Nessun film in libreria.</p>
+                    }
+                    else if (DisplayedMovies.Count == 0)
+                    {
+                        <p class="rail-empty" style="padding:0;">Nessun film corrisponde al filtro.</p>
+                    }
+                    else
+                    {
+                        <div class="library-grid">
+                            @foreach (var item in DisplayedMovies)
+                            {
+                                <button class="card-poster-link" @onclick="() => GoToSearch(item.Title)">
+                                    <div class="card-poster" style="@PosterStyle(item)">
+                                        @if (item.ThumbUrl is null)
+                                        {
+                                            <div class="card-glyph">🎬</div>
+                                        }
+                                        <p class="card-poster-title">@item.Title</p>
+                                    </div>
+                                    <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
+                                </button>
+                            }
+                        </div>
+                    }
+                </section>
+            }
+            else
+            {
+                <section class="library-section">
+                    @if (series.Count == 0)
+                    {
+                        <p class="rail-empty" style="padding:0;">Nessuna serie in libreria.</p>
+                    }
+                    else if (DisplayedSeries.Count == 0)
+                    {
+                        <p class="rail-empty" style="padding:0;">Nessuna serie corrisponde al filtro.</p>
+                    }
+                    else
+                    {
+                        <div class="library-grid">
+                            @foreach (var item in DisplayedSeries)
+                            {
+                                <button class="card-poster-link" @onclick="() => GoToShow(item)">
+                                    <div class="card-poster" style="@PosterStyle(item)">
+                                        @if (item.ThumbUrl is null)
+                                        {
+                                            <div class="card-glyph">📺</div>
+                                        }
+                                        <p class="card-poster-title">@item.Title</p>
+                                    </div>
+                                    <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
+                                </button>
+                            }
+                        </div>
+                    }
+                </section>
+            }
+        }
+    }
+    else
+    {
+        <h3 style="margin-bottom:12px;">Sfoglia il cloud Premiumize</h3>
+        <p class="page-lede">Le cartelle che organizzi tu stesso su premiumize.me — nessun mount WebDAV richiesto, i file restano sul cloud e si guardano in streaming diretto.</p>
+
+        <div class="tabs section-gap">
+            <button class="tab @(pmType == "movie" ? "active" : "")" @onclick='() => SwitchPmTypeAsync("movie")'>🎬 Film</button>
+            <button class="tab @(pmType == "tv" ? "active" : "")" @onclick='() => SwitchPmTypeAsync("tv")'>📺 Serie TV</button>
+        </div>
+
+        @if (pmBreadcrumb.Count > 1)
+        {
+            <div class="filters-row section-gap" style="flex-wrap:wrap;">
+                @for (int i = 0; i < pmBreadcrumb.Count; i++)
                 {
-                    <p class="rail-empty" style="padding:0;">Nessuna serie in libreria.</p>
+                    var idx = i;
+                    <button class="btn btn-ghost btn-sm" disabled="@(idx == pmBreadcrumb.Count - 1)" @onclick="() => JumpToBreadcrumbAsync(idx)">@pmBreadcrumb[idx].Name</button>
+                    @if (idx < pmBreadcrumb.Count - 1)
+                    {
+                        <span style="color:var(--text-dim);">/</span>
+                    }
                 }
-                else if (DisplayedSeries.Count == 0)
-                {
-                    <p class="rail-empty" style="padding:0;">Nessuna serie corrisponde al filtro.</p>
-                }
-                else
-                {
-                    <div class="library-grid">
-                        @foreach (var item in DisplayedSeries)
+            </div>
+        }
+
+        @if (pmLoading)
+        {
+            <p class="page-lede">Carico da Premiumize…</p>
+        }
+        else if (!string.IsNullOrWhiteSpace(pmError))
+        {
+            <div class="alert alert-error section-gap">@pmError</div>
+        }
+        else if (pmEntries.Count == 0)
+        {
+            <p class="rail-empty" style="padding:0;">Cartella vuota.</p>
+        }
+        else
+        {
+            <div style="overflow-x:auto;">
+                <table class="data-table section-gap">
+                    <thead><tr><th>Nome</th><th>Dimensione</th><th>Azioni</th></tr></thead>
+                    <tbody>
+                        @foreach (var entry in pmEntries)
                         {
-                            <button class="card-poster-link" @onclick="() => GoToShow(item)">
-                                <div class="card-poster" style="@PosterStyle(item)">
-                                    @if (item.ThumbUrl is null)
+                            <tr>
+                                <td class="title-cell" data-label="Nome">@(entry.IsFolder ? "📁 " : "🎬 ")@entry.Name</td>
+                                <td data-label="Dimensione">@(entry.IsFolder ? "" : FormatSize(entry.Size))</td>
+                                <td data-label="Azioni">
+                                    @if (entry.IsFolder)
                                     {
-                                        <div class="card-glyph">📺</div>
+                                        <button class="btn btn-ghost btn-sm" @onclick="() => OpenPmFolderAsync(entry)">Apri</button>
                                     }
-                                    <p class="card-poster-title">@item.Title</p>
-                                </div>
-                                <div class="card-foot"><span>@(item.Year?.ToString() ?? "")</span></div>
-                            </button>
+                                    else
+                                    {
+                                        <button class="btn btn-primary btn-sm" @onclick="() => WatchPmFile(entry)">▶️ Guarda</button>
+                                    }
+                                </td>
+                            </tr>
                         }
-                    </div>
-                }
-            </section>
+                    </tbody>
+                </table>
+            </div>
+        }
+
+        <h3 class="section-gap" style="margin-bottom:12px;">Acquisite tramite l'app</h3>
+        <p class="page-lede">Titoli acquisiti nel cloud Premiumize tramite "Acquisisci in libreria" (nessuno spazio sul disco locale) — restano qui finché non vengono guardati per intero e passano i giorni di retention configurati in Impostazioni, o finché non li rimuovi a mano.</p>
+
+        @if (acquisitionRows.Count == 0)
+        {
+            <p class="rail-empty" style="padding:0;">Nessun titolo acquisito in libreria.</p>
+        }
+        else
+        {
+            <div style="overflow-x:auto;">
+                <table class="data-table section-gap">
+                    <thead>
+                        <tr>
+                            <th>Titolo</th>
+                            <th>Tipo</th>
+                            <th>Libreria</th>
+                            <th>Acquisito il</th>
+                            <th>Stato visione</th>
+                            <th>Azioni</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in acquisitionRows)
+                        {
+                            <tr>
+                                <td class="title-cell" data-label="Titolo">@row.Acquisition.Title</td>
+                                <td data-label="Tipo">@(row.Acquisition.ToTv ? "📺 Serie" : "🎬 Film")</td>
+                                <td data-label="Libreria">@row.SectionTitle</td>
+                                <td data-label="Acquisito il">@row.Acquisition.AcquiredAt.LocalDateTime.ToString("dd/MM/yyyy HH:mm")</td>
+                                <td data-label="Stato visione">@row.WatchStatus</td>
+                                <td data-label="Azioni">
+                                    <button class="btn btn-ghost btn-sm" disabled="@row.Busy" @onclick="() => RemoveAcquisitionAsync(row)">
+                                        @(row.Busy ? "Rimuovo…" : "🗑️ Rimuovi")
+                                    </button>
+                                    @if (!string.IsNullOrWhiteSpace(row.Message))
+                                    {
+                                        <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">@row.Message</div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
         }
     }
 </div>
 
 @code {
+    private string topSection = "plex";
+
     private List<PlexLibraryItem> movies = new();
     private List<PlexLibraryItem> series = new();
     private bool loading = true;
@@ -112,6 +250,33 @@
     private string activeTab = "movies";
     private string filterText = "";
     private string sortBy = "added";
+    private string genreFilter = "";
+
+    // Generi disponibili per il tab correntemente attivo (Film/Serie) — cambia con activeTab, non
+    // con topSection: i due tab hanno cataloghi di generi diversi (es. "Anime" solo nelle serie).
+    private List<string> CurrentGenres => (activeTab == "movies" ? movies : series)
+        .SelectMany(i => i.Genres)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .OrderBy(g => g, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    private List<AcquisitionRow> acquisitionRows = new();
+
+    // Sfoglio diretto cartelle Premiumize (docs/piano-premiumize-libreria.md).
+    private string pmType = "movie";
+    private bool pmLoading;
+    private string? pmError;
+    private List<PremiumizeFolderEntry> pmEntries = new();
+    private List<(string Id, string Name)> pmBreadcrumb = new();
+
+    private class AcquisitionRow
+    {
+        public LibraryAcquisition Acquisition { get; set; } = new();
+        public string SectionTitle { get; set; } = "";
+        public string WatchStatus { get; set; } = "";
+        public bool Busy { get; set; }
+        public string? Message { get; set; }
+    }
 
     private List<PlexLibraryItem> DisplayedMovies => ApplyFilterSort(movies);
     private List<PlexLibraryItem> DisplayedSeries => ApplyFilterSort(series);
@@ -122,6 +287,9 @@
 
         if (!string.IsNullOrWhiteSpace(filterText))
             q = q.Where(i => i.Title.Contains(filterText, StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(genreFilter))
+            q = q.Where(i => i.Genres.Contains(genreFilter, StringComparer.OrdinalIgnoreCase));
 
         q = sortBy switch
         {
@@ -152,6 +320,124 @@
         }
 
         loading = false;
+
+        await LoadAcquisitionsAsync();
+    }
+
+    private async Task LoadAcquisitionsAsync()
+    {
+        var (movieSections, tvSections) = await Plex.GetConfiguredSectionsAsync(CancellationToken.None);
+        var allSections = movieSections.Concat(tvSections).ToList();
+
+        acquisitionRows = Acquisitions.GetAll()
+            .OrderByDescending(a => a.AcquiredAt)
+            .Select(a => new AcquisitionRow
+            {
+                Acquisition = a,
+                SectionTitle = allSections.FirstOrDefault(s => s.Id == a.SectionId)?.Title ?? $"(sezione {a.SectionId})",
+                WatchStatus = LibraryAcquisitionService.DescribeWatchStatus(a, WatchHistory)
+            })
+            .ToList();
+    }
+
+    private bool pmLoadedOnce;
+
+    private async Task SwitchToPremiumizeTabAsync()
+    {
+        topSection = "premiumize";
+        if (!pmLoadedOnce)
+        {
+            pmLoadedOnce = true;
+            await LoadPmRootAsync();
+        }
+    }
+
+    private async Task SwitchPmTypeAsync(string type)
+    {
+        if (pmType == type) return;
+        pmType = type;
+        await LoadPmRootAsync();
+    }
+
+    private async Task LoadPmRootAsync()
+    {
+        var rootId = pmType == "tv" ? ConfigStore.Current.Library.PremiumizeTvFolderId : ConfigStore.Current.Library.PremiumizeMovieFolderId;
+        if (string.IsNullOrWhiteSpace(rootId))
+        {
+            pmEntries = new();
+            pmBreadcrumb = new();
+            pmError = $"Nessuna cartella Premiumize configurata per {(pmType == "tv" ? "le serie TV" : "i film")} — impostala in Impostazioni.";
+            return;
+        }
+
+        pmBreadcrumb = new() { (rootId, pmType == "tv" ? "Serie TV" : "Film") };
+        await LoadPmFolderAsync(rootId);
+    }
+
+    private async Task OpenPmFolderAsync(PremiumizeFolderEntry folder)
+    {
+        pmBreadcrumb.Add((folder.Id, folder.Name));
+        await LoadPmFolderAsync(folder.Id);
+    }
+
+    private async Task JumpToBreadcrumbAsync(int index)
+    {
+        pmBreadcrumb = pmBreadcrumb.Take(index + 1).ToList();
+        await LoadPmFolderAsync(pmBreadcrumb[index].Id);
+    }
+
+    private async Task LoadPmFolderAsync(string folderId)
+    {
+        pmLoading = true;
+        pmError = null;
+        try
+        {
+            pmEntries = await Premiumize.ListFolderAsync(folderId, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            pmError = $"❌ Errore sfogliando la cartella: {ex.Message}";
+            pmEntries = new();
+        }
+        finally
+        {
+            pmLoading = false;
+        }
+    }
+
+    private void WatchPmFile(PremiumizeFolderEntry entry)
+    {
+        if (string.IsNullOrWhiteSpace(entry.Link)) return;
+        Nav.NavigateTo($"/guarda?link={Uri.EscapeDataString(entry.Link)}&title={Uri.EscapeDataString(entry.Name)}&provider=premiumize");
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        double size = bytes;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        int unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return $"{size:0.##} {units[unit]}";
+    }
+
+    private async Task RemoveAcquisitionAsync(AcquisitionRow row)
+    {
+        row.Busy = true;
+        row.Message = null;
+        try
+        {
+            await Orchestrator.RemoveLibraryAcquisitionAsync(row.Acquisition, CancellationToken.None);
+            acquisitionRows.Remove(row);
+        }
+        catch (Exception ex)
+        {
+            row.Message = $"❌ Errore rimuovendo: {ex.Message}";
+            row.Busy = false;
+        }
     }
 
     private List<PlexLibraryItem> LoadFromFilesystem(bool toTv)

@@ -29,9 +29,7 @@ public class DownloadHistoryService
     public DownloadHistoryService(ILogger<DownloadHistoryService> log)
     {
         _log = log;
-        var dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data");
-        Directory.CreateDirectory(dataDir);
-        _path = Path.Combine(dataDir, "download-history.jsonl");
+        _path = Path.Combine(AppPaths.Data, "download-history.jsonl");
     }
 
     public async Task AppendAsync(DownloadHistoryEntry entry)

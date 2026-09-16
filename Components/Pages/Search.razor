@@ -8,6 +8,8 @@
 @inject PlexClient Plex
 @inject DownloadOrchestrator Orchestrator
 @inject DownloadQueueService Queue
+@inject DebridProviderFactory DebridFactory
+@inject NavigationManager Nav
 
 <PageTitle>Send2Plex — Cerca</PageTitle>
 
@@ -15,18 +17,61 @@
     <h1>Cerca</h1>
     <p class="page-lede">Trova un film o una serie sui siti configurati e scaricalo direttamente su Plex.</p>
 
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:14px;">
+        <span style="font-size:0.85rem; color:var(--text-dim);">Provider debrid</span>
+        <button type="button" class="btn btn-sm @(pageProvider == "allDebrid" ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick='() => pageProvider = "allDebrid"'><img src="/img/provider/alldebrid.png" alt="" style="width:18px; height:18px; object-fit:contain;" />AllDebrid</button>
+        <button type="button" class="btn btn-sm @(pageProvider == "realDebrid" ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick='() => pageProvider = "realDebrid"'><img src="/img/provider/realdebrid.png" alt="" style="width:18px; height:18px; object-fit:contain;" />Real-Debrid</button>
+        <button type="button" class="btn btn-sm @(pageProvider == "premiumize" ? "btn-primary" : "btn-ghost")" style="display:flex; align-items:center; gap:6px;" @onclick='() => pageProvider = "premiumize"'><img src="/img/provider/premiumizeme.png" alt="" style="width:18px; height:18px; object-fit:contain;" />Premiumize</button>
+    </div>
+
     <form class="searchbar section-gap" style="max-width:520px" @onsubmit="SearchQueryAsync">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
         <input type="text" placeholder="Cosa vuoi cercare?" @bind="query" @bind:event="oninput" />
         <button type="submit" class="btn btn-primary" disabled="@(string.IsNullOrWhiteSpace(query) || busy)">Cerca</button>
     </form>
 
-    @if (poster is not null)
+    @if (candidates is not null)
+    {
+        <div class="section-gap">
+            <p style="margin-bottom:10px;">Ho trovato più titoli per "<strong>@query</strong>" — quale intendi?</p>
+            <div class="filters-row" style="margin-bottom:14px;">
+                <button class="btn btn-sm @(candidateFilter == "all" ? "btn-primary" : "btn-ghost")" @onclick='() => candidateFilter = "all"'>Tutti</button>
+                <button class="btn btn-sm @(candidateFilter == "movie" ? "btn-primary" : "btn-ghost")" @onclick='() => candidateFilter = "movie"'>🎬 Film</button>
+                <button class="btn btn-sm @(candidateFilter == "tv" ? "btn-primary" : "btn-ghost")" @onclick='() => candidateFilter = "tv"'>📺 Serie TV</button>
+                <button class="btn btn-sm @(candidateFilter == "anime" ? "btn-primary" : "btn-ghost")" @onclick='() => candidateFilter = "anime"'>⛩️ Anime</button>
+            </div>
+            @if (FilteredCandidates.Count == 0)
+            {
+                <p class="page-lede">Nessun titolo corrisponde a questo filtro.</p>
+            }
+            else
+            {
+                <div style="display:flex; flex-wrap:wrap; gap:14px;">
+                    @foreach (var c in FilteredCandidates)
+                    {
+                        <button type="button" class="panel candidate-card" disabled="@busy" @onclick="() => PickCandidateAsync(c)">
+                            @if (!string.IsNullOrWhiteSpace(c.PosterUrl))
+                            {
+                                <img src="@c.PosterUrl" alt="" style="width:100%; border-radius:6px; display:block;" />
+                            }
+                            <div style="padding:8px 2px 2px;">
+                                <div style="font-weight:600; font-size:0.88rem;">@c.Title @(c.Year is not null ? $"({c.Year})" : "")</div>
+                                <div style="font-size:0.78rem; color:var(--text-dim); margin-top:2px;">
+                                    @(c.MediaType == "tv" ? "📺 Serie TV" : "🎬 Film")@(c.IsAnime ? " · ⛩️ Anime" : "")
+                                </div>
+                            </div>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    }
+    else if (poster is not null)
     {
         <div class="panel section-gap" style="display:flex; gap:20px;">
             @if (!string.IsNullOrWhiteSpace(poster.PosterUrl))
             {
-                <img src="@poster.PosterUrl" alt="" style="width:100px; border-radius:6px; flex-shrink:0;" />
+                <img src="@poster.PosterUrl" alt="" style="width:100px; border-radius:6px; flex-shrink:0; align-self:flex-start;" />
             }
             <div>
                 <h3>@poster.Title @(poster.Year is not null ? $"({poster.Year})" : "")</h3>
@@ -186,13 +231,62 @@
                                 }
                                 else
                                 {
-                                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                                    var fstate = GetFileState(r);
+                                    <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+                                        <button type="button" class="btn btn-ghost btn-sm" style="padding:4px 8px;" disabled="@(busy || fstate.Busy)" title="Provider debrid per questo file: @ProviderLabel(fstate.Provider) (tocca per cambiare)" @onclick="() => ToggleRowProvider(fstate)">
+                                            <img src="/img/provider/@(ParseProvider(fstate.Provider).ToIconFileName()).png" alt="@ProviderLabel(fstate.Provider)" style="width:20px; height:20px; object-fit:contain; display:block;" />
+                                        </button>
                                         <button class="btn btn-ok btn-sm" disabled="@busy" @onclick="() => DownloadAsync(r)">Scarica</button>
                                         <button class="btn btn-ghost btn-sm" disabled="@busy" title="Aggiungi alla coda invece di scaricare subito" @onclick="() => EnqueueResult(r)">➕ Coda</button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@(busy || fstate.Busy)" title="Guarda subito in streaming, senza scaricare su disco" @onclick="() => WatchResultAsync(r, fstate)">▶️ Guarda</button>
+                                        <button class="btn btn-ghost btn-sm" disabled="@(busy || fstate.Busy)" title="Scegli quali file scaricare invece di tutti (richiede caricare il magnet sul provider)" @onclick="() => ToggleFilesAsync(r, fstate)">
+                                            @(fstate.ShowPanel ? "📄 Nascondi file" : "📄 Scegli file")
+                                        </button>
+                                        @if (fstate.Provider == "premiumize")
+                                        {
+                                            <button class="btn btn-ghost btn-sm" disabled="@(busy || fstate.Busy || selectedSectionId is null)" title="Acquisisci nel cloud Premiumize e mostralo in libreria Plex, senza occupare spazio sul disco locale" @onclick="() => AcquireToLibraryAsync(r, fstate)">📚 Acquisisci in libreria</button>
+                                        }
                                     </div>
                                     @if (enqueuedResult == r)
                                     {
                                         <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">Aggiunto alla coda</div>
+                                    }
+                                    @if (fstate.ShowPanel)
+                                    {
+                                        <div class="panel" style="margin-top:8px; padding:8px 14px; max-width:420px;">
+                                            @if (fstate.Preparing)
+                                            {
+                                                <span style="font-size:0.82rem; color:var(--text-dim);">@(fstate.Message ?? "🧲 Preparo il magnet su AllDebrid…")</span>
+                                            }
+                                            else if (fstate.Files is { Count: 0 })
+                                            {
+                                                <span style="font-size:0.82rem; color:var(--text-dim);">Nessun file trovato.</span>
+                                            }
+                                            else if (fstate.Files is not null)
+                                            {
+                                                @foreach (var f in fstate.Files)
+                                                {
+                                                    <div class="checkbox-row" style="font-size:0.85rem;">
+                                                        <input type="checkbox"
+                                                               id="@($"sfile-{f.Link.GetHashCode()}")"
+                                                               checked="@fstate.SelectedLinks.Contains(f.Link)"
+                                                               @onchange="e => ToggleFileSelection(fstate, f.Link, (bool)e.Value!)" />
+                                                        <label for="@($"sfile-{f.Link.GetHashCode()}")" title="@f.Name">@Truncate(f.Name, 44) <span style="color:var(--text-dim)">(@FormatSize(f.Size))</span></label>
+                                                        <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 8px;" title="Guarda questo file in streaming" @onclick="() => NavigateToWatch(f, f.Name, fstate.Provider)">▶️</button>
+                                                    </div>
+                                                }
+                                                <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
+                                                    <button class="btn btn-primary btn-sm" disabled="@fstate.Busy" @onclick="() => DownloadSelectedAsync(r, fstate)">
+                                                        @(fstate.Busy ? "Scarico…" : "Scarica selezionati")
+                                                    </button>
+                                                    <button class="btn btn-ghost btn-sm" disabled="@fstate.Busy" @onclick="() => EnqueueSelected(r, fstate)">➕ Coda (selezionati)</button>
+                                                </div>
+                                            }
+                                            @if (!string.IsNullOrWhiteSpace(fstate.Message) && !fstate.Preparing)
+                                            {
+                                                <div style="font-size:0.78rem; color:var(--text-dim); margin-top:6px;">@fstate.Message</div>
+                                            }
+                                        </div>
                                     }
                                 }
                             </td>
@@ -208,6 +302,19 @@
         <div class="alert alert-ok" style="margin-top:16px;">@downloadResultMessage</div>
     }
 </div>
+
+<style>
+    .candidate-card {
+        width: 140px;
+        text-align: left;
+        cursor: pointer;
+        font: inherit;
+        color: inherit;
+        padding: 8px;
+    }
+    .candidate-card:disabled { cursor: default; opacity: 0.6; }
+    .candidate-card:not(:disabled):hover { border-color: var(--accent); }
+</style>
 
 @code {
     [SupplyParameterFromQuery(Name = "q")]
@@ -226,6 +333,30 @@
         .Where(s => s.Enabled)
         .OrderByDescending(s => s.UseTorrentioApi) // Torrentio (motore di default) sempre per primo
         .ToList();
+
+    // Provider debrid (Punto UI ibrida, vedi piano): default persistito -> toggle di pagina -> icona
+    // per-risultato. "allDebrid"/"realDebrid" come stringa (stesso stile di destinationIsTv),
+    // convertito in DebridProvider solo al momento di chiamare l'orchestrator.
+    private string pageProvider = "allDebrid";
+
+    private static string ProviderLabel(string provider) => ParseProvider(provider).ToDisplayName();
+    private static DebridProvider ParseProvider(string provider) => DebridProviderNames.ParseApiValue(provider);
+
+    // Tap sull'icona per-riga: cicla tra i 3 provider (AllDebrid → Real-Debrid → Premiumize →
+    // AllDebrid), stesso principio del toggle a 2 vie originale, esteso al terzo provider.
+    private static readonly string[] ProviderCycle = { "allDebrid", "realDebrid", "premiumize" };
+
+    private void ToggleRowProvider(FileSelectState state)
+    {
+        var currentIndex = Array.IndexOf(ProviderCycle, state.Provider);
+        state.Provider = ProviderCycle[(currentIndex + 1) % ProviderCycle.Length];
+        // Un magnet già preparato resta legato al provider con cui è stato caricato: cambiare
+        // provider dopo la preparazione invalida quel magnet, va ripreparato da capo sul nuovo.
+        state.MagnetId = null;
+        state.Files = null;
+        state.SelectedLinks.Clear();
+        state.ShowPanel = false;
+    }
 
     private string query = "";
     private TmdbPosterInfo? poster;
@@ -253,8 +384,26 @@
 
     private List<PlexSectionInfo> CurrentSectionOptions => destinationIsTv == "true" ? tvSections : movieSections;
 
-    private void SetDestination(bool toTv)
+    private void SetDestination(bool toTv, bool isAnime = false)
     {
+        // Se il titolo è riconosciuto come anime (euristica TMDB), cerca una libreria "Anime" in
+        // ENTRAMBE le liste (Movies e TV), non solo in quella del tipo TMDB del titolo: un film
+        // anime (media_type "movie") può benissimo avere la sua libreria Anime configurata sotto
+        // TV in Plex (o viceversa) — l'utente vuole che finisca lì comunque, indipendentemente da
+        // come TMDB classifica il titolo.
+        if (isAnime)
+        {
+            var animeInTv = tvSections.FirstOrDefault(s => s.Title.Contains("anime", StringComparison.OrdinalIgnoreCase));
+            var animeInMovies = movieSections.FirstOrDefault(s => s.Title.Contains("anime", StringComparison.OrdinalIgnoreCase));
+            var anime = animeInTv ?? animeInMovies;
+            if (anime is not null)
+            {
+                destinationIsTv = animeInTv is not null ? "true" : "false";
+                selectedSectionId = anime.Id;
+                return;
+            }
+        }
+
         destinationIsTv = toTv ? "true" : "false";
         var options = toTv ? tvSections : movieSections;
         selectedSectionId = options.Count > 0 ? options[0].Id : null;
@@ -269,6 +418,21 @@
     private HashSet<(int Season, int Episode)>? ownedEpisodesForShow;
     private int? currentSeasonNumber;
 
+    // Selettore multi-candidato TMDB (Film/Serie TV/Anime che condividono lo stesso titolo, es.
+    // "Supergirl" serie 2015 e film 2026): valorizzato solo quando la ricerca trova più di un
+    // risultato plausibile, altrimenti si procede subito con l'unico trovato come prima.
+    private List<TmdbCandidate>? candidates;
+    private TmdbCandidate? selectedCandidate;
+    private string candidateFilter = "all";
+
+    private List<TmdbCandidate> FilteredCandidates => candidates is null ? new() : candidateFilter switch
+    {
+        "movie" => candidates.Where(c => c.MediaType == "movie").ToList(),
+        "tv" => candidates.Where(c => c.MediaType == "tv").ToList(),
+        "anime" => candidates.Where(c => c.IsAnime).ToList(),
+        _ => candidates
+    };
+
     protected override async Task OnInitializedAsync()
     {
         ProgressEvents.OnProgressUpdate += OnProgressUpdate;
@@ -278,6 +442,7 @@
         movieSections = movies;
         tvSections = tv;
         SetDestination(false);
+        pageProvider = ConfigStore.Current.General.PreferredDebridProvider.ToApiValue();
 
         // Arrivo da un click su un poster in Home (o da un link diretto con ?q=...): precompila
         // e avvia subito la ricerca, come se l'utente l'avesse scritta a mano.
@@ -320,32 +485,78 @@
         currentSeasonNumber = null;
         trailerKey = null;
         showTrailer = false;
+        poster = null;
+        candidates = null;
+        selectedCandidate = null;
+        candidateFilter = "all";
         try
         {
-            poster = await Tmdb.SearchPosterAsync(query, CancellationToken.None);
+            var found = await Tmdb.SearchCandidatesAsync(query, CancellationToken.None);
 
-            // Rileva in automatico Movies/TV dal tipo trovato su TMDB, così l'utente non deve
-            // ricordarsi di impostarlo a mano (e rischiare di scaricare nella cartella sbagliata).
-            if (poster is not null && !string.IsNullOrEmpty(poster.MediaType))
-                SetDestination(poster.MediaType == "tv");
-
-            await CheckOwnershipAsync();
-
-            if (poster is not null)
-                trailerKey = await Tmdb.GetTrailerAsync(poster.TmdbId, poster.MediaType == "tv", CancellationToken.None);
-
-            // Torrentio è il motore di default: appena si cerca, parte subito su di lui (se
-            // abilitato) senza dover scegliere il sito a mano. Gli altri siti restano comunque
-            // disponibili come bottoni, per cambiare fonte.
-            var defaultSite = enabledSites.FirstOrDefault(s => s.UseTorrentioApi);
-            if (defaultSite is not null)
+            if (found.Count == 0)
             {
-                await SelectSiteCoreAsync(defaultSite);
+                statusMessage = $"❌ Non ho trovato \"{query}\" su TMDB.";
+                return;
             }
+
+            // Se c'è un solo candidato, si procede subito come prima (nessun passaggio in più per
+            // il caso comune). Con più candidati (es. "Supergirl" serie 2015 + film 2026), è
+            // l'utente a scegliere quale intende dal selettore mostrato in pagina.
+            if (found.Count == 1)
+                await ProceedWithCandidateAsync(found[0]);
+            else
+                candidates = found;
         }
         finally
         {
             busy = false;
+        }
+    }
+
+    private async Task PickCandidateAsync(TmdbCandidate c)
+    {
+        busy = true;
+        try
+        {
+            await ProceedWithCandidateAsync(c);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task ProceedWithCandidateAsync(TmdbCandidate c)
+    {
+        selectedCandidate = c;
+        candidates = null;
+        statusMessage = null;
+
+        poster = new TmdbPosterInfo
+        {
+            TmdbId = c.TmdbId,
+            Title = c.Title,
+            Year = c.Year,
+            Overview = c.Overview,
+            PosterUrl = c.PosterUrl ?? "",
+            MediaType = c.MediaType
+        };
+
+        // Rileva in automatico Movies/TV/Anime dal tipo scelto, così l'utente non deve ricordarsi
+        // di impostarlo a mano (e rischiare di scaricare nella cartella sbagliata).
+        SetDestination(c.MediaType == "tv", c.IsAnime);
+
+        await CheckOwnershipAsync();
+
+        trailerKey = await Tmdb.GetTrailerAsync(c.TmdbId, c.MediaType == "tv", CancellationToken.None);
+
+        // Torrentio è il motore di default: appena scelto il titolo, parte subito su di lui (se
+        // abilitato) senza dover scegliere il sito a mano. Gli altri siti restano comunque
+        // disponibili come bottoni, per cambiare fonte.
+        var defaultSite = enabledSites.FirstOrDefault(s => s.UseTorrentioApi);
+        if (defaultSite is not null)
+        {
+            await SelectSiteCoreAsync(defaultSite);
         }
     }
 
@@ -371,7 +582,20 @@
         if (site.UseTorrentioApi)
             {
                 statusMessage = $"🔎 Cerco \"{query}\" su TMDB per Torrentio…";
-                var match = await Tmdb.ResolveImdbIdAsync(query, CancellationToken.None);
+
+                // Se l'utente ha già scelto un candidato specifico (selettore multi-risultato),
+                // risolve l'IMDb ID direttamente da quel TMDB id/tipo — evita di rifare una ricerca
+                // testuale fuzzy che potrebbe risolvere un titolo diverso da quello scelto (es.
+                // "Supergirl" film invece della serie appena selezionata).
+                TmdbImdbMatch? match = null;
+                if (selectedCandidate is not null)
+                {
+                    var imdbId = await Tmdb.GetImdbIdAsync(selectedCandidate.TmdbId, selectedCandidate.MediaType, CancellationToken.None);
+                    if (!string.IsNullOrWhiteSpace(imdbId))
+                        match = new TmdbImdbMatch { TmdbId = selectedCandidate.TmdbId, ImdbId = imdbId, MediaType = selectedCandidate.MediaType, Title = selectedCandidate.Title };
+                }
+                match ??= await Tmdb.ResolveImdbIdAsync(query, CancellationToken.None);
+
                 if (match is null)
                 {
                     statusMessage = $"❌ Non ho trovato \"{query}\" su TMDB.";
@@ -597,8 +821,212 @@
 
     private TorrentSearchResult? enqueuedResult;
 
+    // Stato della selezione file per riga di risultato (Punto: selezione file anche da Cerca, non
+    // solo da AllDebrid). A differenza di un magnet AllDebrid già pronto, qui il magnet va prima
+    // risolto/caricato/atteso: "Preparing" copre quella fase, poi Files viene popolato e l'utente
+    // può scegliere cosa scaricare, esattamente come nella tab AllDebrid.
+    private class FileSelectState
+    {
+        public bool ShowPanel { get; set; }
+        public bool Preparing { get; set; }
+        public bool Busy { get; set; }
+        public string? Message { get; set; }
+        public string? MagnetId { get; set; }
+        public List<MagnetFile>? Files { get; set; }
+        public HashSet<string> SelectedLinks { get; set; } = new();
+
+        // Inizializzato dal toggle di pagina alla prima apertura della riga, sovrascrivibile per
+        // quel solo file dall'icona per-risultato (vedi ToggleRowProvider).
+        public string Provider { get; set; } = "allDebrid";
+    }
+
+    private readonly Dictionary<TorrentSearchResult, FileSelectState> fileStates = new();
+
+    private FileSelectState GetFileState(TorrentSearchResult r)
+    {
+        if (!fileStates.TryGetValue(r, out var state))
+        {
+            state = new FileSelectState { Provider = pageProvider };
+            fileStates[r] = state;
+        }
+        return state;
+    }
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
+    private static string FormatSize(long bytes)
+    {
+        double size = bytes;
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        int unit = 0;
+        while (size >= 1024 && unit < units.Length - 1)
+        {
+            size /= 1024;
+            unit++;
+        }
+        return $"{size:0.##} {units[unit]}";
+    }
+
+    private async Task ToggleFilesAsync(TorrentSearchResult r, FileSelectState state)
+    {
+        if (state.ShowPanel)
+        {
+            state.ShowPanel = false;
+            return;
+        }
+
+        state.ShowPanel = true;
+        if (state.MagnetId is not null || state.Files is not null)
+            return; // già preparato in precedenza, mostra solo il pannello
+
+        state.Preparing = true;
+        state.Message = null;
+        try
+        {
+            var toTv = destinationIsTv == "true";
+            var provider = ParseProvider(state.Provider);
+            var prep = await Orchestrator.PrepareSearchResultAsync(
+                r, selectedSite?.RequiresVpn == true, toTv, SearchCfg.TimeoutSeconds, CancellationToken.None,
+                onStatus: msg => { state.Message = msg; InvokeAsync(StateHasChanged); },
+                provider: provider);
+
+            if (!prep.Success)
+            {
+                state.Message = prep.Message;
+                state.ShowPanel = false;
+                return;
+            }
+
+            state.MagnetId = prep.MagnetId;
+            state.Message = null;
+            state.Files = await DebridFactory.Get(provider).GetMagnetFilesDetailedAsync(prep.MagnetId!, CancellationToken.None);
+            state.SelectedLinks = state.Files.Select(f => f.Link).ToHashSet();
+        }
+        catch (Exception ex)
+        {
+            state.Message = $"❌ Errore preparando il magnet: {ex.Message}";
+            state.ShowPanel = false;
+        }
+        finally
+        {
+            state.Preparing = false;
+        }
+    }
+
+    private void ToggleFileSelection(FileSelectState state, string link, bool isChecked)
+    {
+        if (isChecked) state.SelectedLinks.Add(link);
+        else state.SelectedLinks.Remove(link);
+    }
+
+    // "Guarda in streaming": prepara il magnet (se non già fatto, stesso passo di "Scegli file")
+    // e va dritto al player se c'è un solo file, altrimenti lascia aperto il pannello per scegliere
+    // quale guardare tramite il pulsante ▶️ per riga.
+    private async Task WatchResultAsync(TorrentSearchResult r, FileSelectState state)
+    {
+        if (state.Files is null)
+        {
+            await ToggleFilesAsync(r, state);
+            if (state.Files is null || state.Files.Count == 0) return;
+        }
+
+        if (state.Files.Count == 1)
+        {
+            NavigateToWatch(state.Files[0], r.Title, state.Provider);
+            return;
+        }
+
+        state.ShowPanel = true;
+    }
+
+    private void NavigateToWatch(MagnetFile f, string title, string provider) =>
+        Nav.NavigateTo($"/guarda?link={Uri.EscapeDataString(f.Link)}&title={Uri.EscapeDataString(title)}&provider={provider}");
+
+    // "Acquisisci in libreria" (docs/piano-premiumize-libreria.md, solo Premiumize): a differenza
+    // di DownloadSelectedAsync non scarica nulla su disco, registra solo il tracking e chiede il
+    // refresh Plex — il file resta nel cloud Premiumize, già visibile a Plex tramite il mount
+    // WebDAV configurato come cartella della sezione scelta.
+    private async Task AcquireToLibraryAsync(TorrentSearchResult r, FileSelectState state)
+    {
+        if (selectedCandidate is null || selectedSectionId is null) return;
+
+        if (state.MagnetId is null)
+        {
+            await ToggleFilesAsync(r, state);
+            if (state.MagnetId is null) return; // preparazione fallita, messaggio già impostato
+        }
+
+        state.Busy = true;
+        state.Message = null;
+        try
+        {
+            var toTv = destinationIsTv == "true";
+            var result = await Orchestrator.AcquireReadyMagnetToLibraryAsync(
+                state.MagnetId, r.Title, toTv, selectedCandidate.TmdbId, selectedSectionId.Value, CancellationToken.None,
+                onStatus: msg => { state.Message = msg; InvokeAsync(StateHasChanged); });
+
+            state.Message = result.Message;
+        }
+        catch (Exception ex)
+        {
+            state.Message = $"❌ Errore durante l'acquisizione: {ex.Message}";
+        }
+        finally
+        {
+            state.Busy = false;
+        }
+    }
+
+    private async Task DownloadSelectedAsync(TorrentSearchResult r, FileSelectState state)
+    {
+        if (state.MagnetId is null) return;
+
+        state.Busy = true;
+        state.Message = null;
+        try
+        {
+            var toTv = destinationIsTv == "true";
+            var result = await Orchestrator.DownloadReadyMagnetAsync(
+                state.MagnetId, r.Title, toTv, r.SourceListName ?? r.SiteName, CancellationToken.None,
+                onStatus: msg => { state.Message = msg; InvokeAsync(StateHasChanged); },
+                sectionId: selectedSectionId,
+                selectedFileLinks: state.SelectedLinks,
+                provider: ParseProvider(state.Provider));
+
+            state.Message = result.Message;
+        }
+        catch (Exception ex)
+        {
+            state.Message = $"❌ Errore durante il download: {ex.Message}";
+        }
+        finally
+        {
+            state.Busy = false;
+        }
+    }
+
+    private void EnqueueSelected(TorrentSearchResult r, FileSelectState state)
+    {
+        if (state.MagnetId is null) return;
+
+        Queue.Enqueue(new QueuedDownloadItem
+        {
+            Title = r.Title,
+            SizeText = r.SizeText,
+            SourceName = r.SourceListName ?? r.SiteName,
+            ToTv = destinationIsTv == "true",
+            SectionId = selectedSectionId,
+            DestinationLabel = CurrentSectionOptions.FirstOrDefault(s => s.Id == selectedSectionId)?.Title,
+            MagnetId = state.MagnetId,
+            SelectedFileLinks = new HashSet<string>(state.SelectedLinks),
+            Provider = ParseProvider(state.Provider)
+        });
+        state.Message = "Aggiunto alla coda";
+    }
+
     private void EnqueueResult(TorrentSearchResult result)
     {
+        var provider = GetFileState(result).Provider;
         Queue.Enqueue(new QueuedDownloadItem
         {
             Title = result.Title,
@@ -609,7 +1037,8 @@
             DestinationLabel = CurrentSectionOptions.FirstOrDefault(s => s.Id == selectedSectionId)?.Title,
             RequiresVpn = selectedSite?.RequiresVpn == true,
             TimeoutSeconds = SearchCfg.TimeoutSeconds,
-            SearchResult = result
+            SearchResult = result,
+            Provider = ParseProvider(provider)
         });
         enqueuedResult = result;
     }
@@ -624,11 +1053,13 @@
         try
         {
             var toTv = destinationIsTv == "true";
+            var provider = GetFileState(result).Provider;
 
             var pipelineResult = await Orchestrator.DownloadFromSearchResultAsync(
                 result, selectedSite?.RequiresVpn == true, toTv, SearchCfg.TimeoutSeconds, CancellationToken.None,
                 onStatus: msg => { statusMessage = msg; InvokeAsync(StateHasChanged); },
-                sectionId: selectedSectionId);
+                sectionId: selectedSectionId,
+                provider: ParseProvider(provider));
 
             downloadResultMessage = pipelineResult.Message;
         }

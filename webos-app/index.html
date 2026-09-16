@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<!-- BUG REALE (TV 4K): senza un viewport esplicito, il layout usava una larghezza di default più
+     stretta della risoluzione 1920x1080 dichiarata in appinfo.json — la webapp riempiva solo una
+     parte della superficie che webOS poi ingrandisce sull'intero pannello fisico, lasciando un
+     margine nero inutilizzato ai lati (segnalato dall'utente con una foto della TV vera).
+     width/height fissi a 1920x1080 (non "device-width") mappano 1:1 con la risoluzione dichiarata,
+     evitando ambiguità su questo motore. -->
+<meta name="viewport" content="width=1920, height=1080, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>NimbusFX</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Schermata di apertura (richiesta utente): niente "hidden" di default, così è l'UNICA cosa
+       visibile appena la pagina carica, prima ancora che app.js giri — evita un flash di schermo
+       nero/vuoto mentre il resto si inizializza. Non fa parte dell'array VIEWS in app.js (non è
+       raggiungibile navigando, è un one-shot), quindi va nascosta a mano a fine animazione invece
+       che tramite showView(). -->
+  <section id="view-splash" class="view splash-view">
+    <div class="splash">
+      <img class="splash-mark" src="assets/logo.png" alt="" />
+      <img class="splash-text" src="assets/NimbusFX.png" alt="NimbusFX" />
+    </div>
+  </section>
+
+  <!-- Configurazione: IP/porta del PC che fa girare Send2Plex sulla rete locale -->
+  <section id="view-setup" class="view hidden">
+    <div class="setup-box">
+      <div class="brand"><img class="brand-mark" src="assets/logo.png" alt="" /> NimbusFX</div>
+      <!-- Restyle 2026-09-14 (richiesta utente: "riorganizzando il tutto in tab e per gerarchia"):
+           4 tab dalla più infrastrutturale (Connessione, prerequisito di tutto il resto) alla più
+           di dettaglio (Prossimo episodio). Stesso pattern chip di sempre (buildFilterChips in
+           app.js, mai un widget nativo — vedi nota sotto sul bug reale del <select>), qui applicato
+           anche alla barra tab stessa: un valore selezionato tra 4 opzioni è esattamente il caso
+           d'uso di buildFilterChips, non serve un meccanismo nuovo. "Salva e connetti" e lo stato
+           restano FUORI dai tab, sempre visibili: salvano tutti i campi di tutti i tab insieme,
+           indipendentemente da quale sia aperto (renderSetupChips li disegna comunque tutti). -->
+      <div id="setup-tabs" class="rail setup-tabs"></div>
+
+      <div class="setup-tab-panel" data-tab="connection">
+        <p class="hint">Cerca automaticamente il PC che fa girare Send2Plex sulla rete locale, oppure inserisci l'indirizzo a mano (es. <code>192.168.1.160:5075</code>).</p>
+        <button id="setup-scan" class="tile tile-small" tabindex="0">🔍 Cerca sulla rete locale</button>
+        <input id="setup-host" class="field" type="text" placeholder="192.168.1.160:5075" tabindex="0" />
+      </div>
+
+      <!-- BUG REALE (segnalato dall'utente 2026-09-13): un <select> nativo apriva un picker che
+           col telecomando restava bloccato, costringendo a riavviare l'app — sostituiti con righe
+           di chip (bottoni), stesso pattern già usato ovunque nel resto dell'app per i filtri
+           (buildFilterChips in app.js), mai un widget nativo del browser. -->
+      <div class="setup-tab-panel hidden" data-tab="streaming">
+        <label class="field-label">Qualità video (streaming)</label>
+        <div id="setup-quality" class="rail"></div>
+        <label class="field-label">Modalità riproduzione</label>
+        <div id="setup-playback-mode" class="rail"></div>
+        <p class="hint" style="font-size:18px;">"Automatica" prova prima la riproduzione diretta e passa alla trascodifica solo se serve; "Sempre diretta" non trascodifica mai da sola; "Sempre trascodifica" salta subito la diretta.</p>
+      </div>
+
+      <div class="setup-tab-panel hidden" data-tab="search">
+        <label class="field-label">Qualità torrent preferita</label>
+        <div id="setup-preferred-quality" class="rail"></div>
+        <label class="field-label">Lingua preferita</label>
+        <div id="setup-preferred-language" class="rail"></div>
+        <p class="hint" style="font-size:18px;">Se impostate, filtrano automaticamente la lista versioni di un film/episodio (restano comunque modificabili lì per lì).</p>
+        <label class="field-label">Provider debrid preferito</label>
+        <div id="setup-preferred-provider" class="rail"></div>
+        <p class="hint" style="font-size:18px;">Pre-seleziona il provider in Libreria e nella lista versioni (restano comunque cambiabili lì per lì).</p>
+      </div>
+
+      <!-- 3 nuove preferenze (piano-webos-skip-marker-plex.md, punto 3/8) — wiring dichiarativo
+           via NEW_TV_PREFS in app.js (renderSetupChips/openSettingsFromRail/setup-save), stesso
+           pattern chip dei campi sopra. "Usa marker Plex" resta senza effetto finché la parte
+           marker (Fascia 2 del piano) non è costruita — può già essere attivata/disattivata. -->
+      <div class="setup-tab-panel hidden" data-tab="next-episode">
+        <label class="field-label">Prossimo episodio automatico</label>
+        <div id="setup-auto-next-episode" class="rail"></div>
+        <label class="field-label">Countdown prossimo episodio</label>
+        <div id="setup-next-episode-countdown" class="rail"></div>
+        <label class="field-label">Usa marker Plex (salta sigla / anteprima titoli di coda)</label>
+        <div id="setup-plex-markers" class="rail"></div>
+      </div>
+
+      <button id="setup-save" class="tile tile-primary" tabindex="0">Salva e connetti</button>
+      <p id="setup-status" class="hint"></p>
+    </div>
+  </section>
+
+  <!-- Home: ricerca in cima + scaffali di tendenza (stessa fonte di Home.razor) -->
+  <section id="view-home" class="view view-with-icon-rail hidden">
+    <form id="home-search-form" class="search-row">
+      <input id="home-search-input" class="field" type="text" placeholder="Titolo film o serie…" tabindex="0" />
+      <button type="submit" class="tile tile-primary search-go" tabindex="0">🔍 Cerca</button>
+    </form>
+    <div class="rails">
+      <div id="continue-movies-section" class="hidden">
+        <h3 class="rail-heading">▶️ Continua a guardare — Film</h3>
+        <div id="continue-movies-rail" class="rail"></div>
+      </div>
+      <div id="continue-tv-section" class="hidden">
+        <h3 class="rail-heading">▶️ Continua a guardare — Serie</h3>
+        <div id="continue-tv-rail" class="rail"></div>
+      </div>
+      <div id="watchlist-section" class="hidden">
+        <h3 class="rail-heading">📋 La tua Watchlist</h3>
+        <div id="watchlist-rail" class="rail"></div>
+      </div>
+    </div>
+    <!-- La rail a icone non è più scritta qui a mano: initIconRails() in app.js ne clona una
+         identica dentro ogni view che porta la classe "view-with-icon-rail" (vedi le altre view
+         sotto), un solo punto da cui aggiungere/togliere una voce di menu invece di tenerne
+         allineate a mano più copie. -->
+  </section>
+
+  <!-- Categoria (Fase 4, ridisegnato): pagina dedicata per Film/Serie/Generi/Streaming — vedi
+       openCategory in app.js, che costruisce dinamicamente uno o più rail dentro #category-body
+       riusando le stesse funzioni di caricamento già scritte per la vecchia home. -->
+  <section id="view-category" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="category-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 id="category-title" class="topbar-title"></h2>
+    </header>
+    <div id="category-body" class="rails"></div>
+  </section>
+
+  <!-- Libreria: magnet già pronti su AllDebrid -->
+  <section id="view-library" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="library-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 class="topbar-title">Provider (magnet)</h2>
+      <div class="topbar-actions">
+        <button id="library-tab-alldebrid" class="tile tile-small tile-primary" tabindex="0"><img class="chip-icon" src="assets/provider/alldebrid.png" alt="">AllDebrid</button>
+        <button id="library-tab-realdebrid" class="tile tile-small" tabindex="0"><img class="chip-icon" src="assets/provider/realdebrid.png" alt="">Real-Debrid</button>
+        <button id="library-tab-premiumize" class="tile tile-small" tabindex="0"><img class="chip-icon" src="assets/provider/premiumizeme.png" alt="">Premiumize</button>
+        <button id="library-refresh" class="tile tile-small" tabindex="0">🔄 Aggiorna</button>
+      </div>
+    </header>
+    <div id="library-grid" class="grid" data-cols="4"></div>
+  </section>
+
+  <!-- Libreria Plex/Premiumize (docs/piano-premiumize-libreria.md, richiesta utente: equivalente
+       webOS di Library.razor sul web, con streaming diretto per i film già posseduti) -->
+  <section id="view-plex-library" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="plex-library-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 class="topbar-title">Libreria</h2>
+      <div class="topbar-actions">
+        <button id="plex-library-tab-plex" class="tile tile-small tile-primary" tabindex="0">📀 Plex</button>
+        <button id="plex-library-tab-premiumize" class="tile tile-small" tabindex="0"><img class="chip-icon" src="assets/provider/premiumizeme.png" alt="">Premiumize</button>
+        <button id="plex-library-refresh" class="tile tile-small" tabindex="0">🔄 Aggiorna</button>
+      </div>
+    </header>
+    <!-- Tipo + ricerca testuale sulla stessa riga (idee-miglioramento-webos.md: "nessuna casella
+         di ricerca testuale nella Libreria webOS, il web ce l'ha già") — filtro client-side sui
+         dati già scaricati da /library/all, nessuna nuova chiamata al server ad ogni carattere. La
+         ricerca non ha senso mentre si sfoglia Premiumize (righe reali di cartelle/file, non
+         l'elenco Plex già in memoria): nascosta in quel caso da plex-library-tab-premiumize sotto. -->
+    <div class="search-row" style="padding:8px 24px 0;">
+      <button id="plex-library-type-movie" class="tile tile-small tile-primary" tabindex="0">🎬 Film</button>
+      <button id="plex-library-type-tv" class="tile tile-small" tabindex="0">📺 Serie</button>
+      <input id="plex-library-search-input" class="field" type="text" placeholder="Cerca nella libreria…" tabindex="0" />
+    </div>
+    <!-- Sfoglio diretto cartelle Premiumize (docs/piano-premiumize-libreria.md): breadcrumb per
+         navigare dentro le sottocartelle, nascosto quando si sfoglia Plex o si è alla radice. -->
+    <div id="plex-library-breadcrumb" class="topbar-actions hidden" style="padding:8px 24px 0;"></div>
+    <!-- Ordina/filtra la griglia Plex (richiesta utente, "come Plex"): applicati lato client sui
+         dati già scaricati, nessuna nuova chiamata al server per ogni cambio filtro. Etichette
+         "Ordina"/"Genere" aggiunte per chiarezza (restyle 2026-09-14, richiesta utente: i filtri
+         erano da organizzare meglio) — prima erano due righe di chip identiche senza alcuna
+         indicazione di cosa facesse l'una o l'altra. -->
+    <div id="plex-library-sort-row" class="filters-row" style="padding:8px 24px 0;">
+      <div class="filter-group">
+        <span class="filter-label">Ordina</span>
+        <div id="plex-library-sort" class="rail filter-rail"></div>
+      </div>
+      <div class="filter-group">
+        <span class="filter-label">Genere</span>
+        <div id="plex-library-genre" class="rail filter-rail"></div>
+      </div>
+    </div>
+    <!-- Colonne a larghezza fissa (220px, la stessa dei poster nei rail), non repeat(4,1fr):
+         segnalato dall'utente 2026-09-14 ("le locandine sono enormi") — su 4 colonne elastiche a
+         piena larghezza ogni poster arrivava a ~400px+, quasi il doppio del resto dell'app. -->
+    <div id="plex-library-grid" class="grid poster-grid-fixed"></div>
+  </section>
+
+  <!-- Download (richiesta utente): sezione dedicata sulla stessa coda usata da Queue.razor sul PC
+       — il download parte dal pulsante sulla card episodio/film (mai dal player) e prosegue lato
+       server indipendentemente da questa vista, che serve solo a seguirne il progresso. -->
+  <section id="view-downloads" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="downloads-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 class="topbar-title">Download</h2>
+      <div class="topbar-actions">
+        <button id="downloads-refresh" class="tile tile-small" tabindex="0">🔄 Aggiorna</button>
+      </div>
+    </header>
+    <div id="downloads-grid" class="stack-list"></div>
+  </section>
+
+  <!-- Cerca: query TMDB + griglia poster dei candidati -->
+  <section id="view-search" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="search-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 class="topbar-title">Cerca</h2>
+    </header>
+    <form id="search-form" class="search-row">
+      <input id="search-input" class="field" type="text" placeholder="Titolo film o serie…" tabindex="0" />
+      <button id="search-go" type="submit" class="tile tile-primary search-go" tabindex="0">🔍 Cerca</button>
+    </form>
+    <div id="search-status" class="hint"></div>
+    <div id="search-grid" class="grid poster-grid" data-cols="5"></div>
+  </section>
+
+  <!-- Dettaglio titolo: poster/backdrop, sinossi, anno/generi/voto, poi "Guarda" (film) o le
+       stagioni (serie) integrate nella stessa schermata — sostituisce il vecchio salto diretto
+       da "Cerca" a stagioni/risultati (piano-restyle-webos-ux.md, Fase 2). -->
+  <section id="view-search-detail" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="detail-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 id="detail-title" class="topbar-title"></h2>
+    </header>
+    <div id="detail-status" class="hint"></div>
+    <div id="detail-body" class="detail-body hidden">
+      <div class="detail-hero">
+        <img id="detail-backdrop" class="detail-backdrop" alt="" />
+        <div class="detail-hero-overlay"></div>
+      </div>
+      <div class="detail-content">
+        <img id="detail-poster" class="detail-poster" alt="" />
+        <div class="detail-info">
+          <div id="detail-meta" class="detail-meta"></div>
+          <p id="detail-cast" class="detail-cast hidden"></p>
+          <button id="detail-watchlist-btn" class="tile tile-small detail-watchlist-btn" tabindex="0">☆ Aggiungi alla Watchlist</button>
+          <p id="detail-overview" class="detail-overview"></p>
+          <div id="detail-action"></div>
+          <!-- Barra di progresso download in corso per questo titolo (richiesta utente) — popolata
+               da pollDetailDownloads in app.js, interrogando /api/tv/downloads?tmdbId=. -->
+          <div id="detail-downloads"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Lista episodi (solo serie): una riga compatta per episodio, con la versione migliore già in
+       badge — click su un episodio apre la lista versioni (view-version-list) per quel solo
+       episodio, invece di affollare questa pagina con le versioni di TUTTI gli episodi insieme. -->
+  <section id="view-search-results" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="results-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 id="results-title" class="topbar-title"></h2>
+      <div class="topbar-actions">
+        <!-- Confronto Torrentio/libreria Plex (richiesta utente): visibile solo se mancano
+             davvero episodi rispetto a quelli già su Plex, vedi renderEpisodeList in app.js. -->
+        <button id="results-download-missing" class="tile tile-small hidden" tabindex="0">⬇️ Episodi mancanti</button>
+      </div>
+    </header>
+    <div class="results-hero-mini">
+      <img id="results-backdrop" class="results-hero-mini-img" alt="" />
+      <div class="results-hero-mini-overlay"></div>
+    </div>
+    <div id="results-status" class="hint"></div>
+    <div id="results-grid" class="stack-list"></div>
+  </section>
+
+  <!-- Lista versioni torrent per un film o un singolo episodio: righe verticali a piena larghezza
+       (niente più troncamento a metà parola) con filtri Qualità/Lingua in cima, applicati sui dati
+       già scaricati (nessuna nuova chiamata al server). Condivisa da entrambi i percorsi: film
+       diretto da search-detail, o episodio scelto da view-search-results. -->
+  <section id="view-version-list" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="version-list-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 id="version-list-title" class="topbar-title"></h2>
+    </header>
+    <div class="results-hero-mini">
+      <img id="version-list-backdrop" class="results-hero-mini-img" alt="" />
+      <div class="results-hero-mini-overlay"></div>
+    </div>
+    <div class="filters-row">
+      <div id="version-filter-provider" class="rail filter-rail"></div>
+      <div id="version-filter-quality" class="rail filter-rail"></div>
+      <div id="version-filter-language" class="rail filter-rail"></div>
+    </div>
+    <div id="version-list-status" class="hint"></div>
+    <div id="version-list-grid" class="stack-list"></div>
+  </section>
+
+  <!-- Elenco file di un magnet multi-file — BUG REALE corretto (2026-09-14, segnalato
+       dall'utente): prima erano tile quadrate a griglia senza copertina, col nome file grezzo
+       troncato su più righe (poco leggibile). Ora stesso schema di #view-version-list: copertina
+       in cima (currentDetailBackdrop, nessuna nuova chiamata) + righe a piena larghezza. -->
+  <section id="view-files" class="view view-with-icon-rail hidden">
+    <header class="topbar">
+      <button id="files-back" class="tile tile-small" tabindex="0">← Indietro</button>
+      <h2 id="files-title" class="topbar-title"></h2>
+    </header>
+    <div class="results-hero-mini">
+      <img id="files-backdrop" class="results-hero-mini-img" alt="" />
+      <div class="results-hero-mini-overlay"></div>
+    </div>
+    <div id="files-grid" class="stack-list"></div>
+  </section>
+
+  <!-- Player -->
+  <section id="view-player" class="view hidden">
+    <video id="player" playsinline></video>
+    <div id="pause-indicator" class="pause-indicator">
+      <svg viewBox="0 0 24 24" width="64" height="64" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"/><rect x="14" y="4" width="4" height="16" rx="1.5"/></svg>
+    </div>
+    <!-- Copre lo schermo nero inevitabile tra un reload e l'altro (es. passaggio automatico da
+         diretta a trascodifica) con uno spinner + un messaggio, così si legge chiaramente come "sta
+         caricando" invece che come un blocco/crash — richiesta utente dopo che la transizione
+         sembrava un errore. Nascosto via opacità (non "hidden"): stesso pattern di
+         #pause-indicator, per una dissolvenza invece di uno scatto secco. -->
+    <div id="player-loading" class="player-loading">
+      <div class="player-loading-spinner"></div>
+      <div id="player-loading-text" class="player-loading-text"></div>
+    </div>
+    <div id="player-overlay" class="overlay">
+      <!-- Icona sorgente + titolo (restyle 2026-09-14, idee-miglioramento-webos.md): badge
+           impostato da updatePlayerSourceBadge() in app.js in base a currentFile.provider (💾
+           locale, altrimenti l'icona del provider debrid già usata altrove nell'app). -->
+      <div class="player-head">
+        <div id="player-source-badge" class="player-source-badge"></div>
+        <div id="player-title" class="player-title"></div>
+      </div>
+      <!-- Riga a sé (sopra i pulsanti, non nella stessa riga): Sinistra/Destra sulla timeline
+           scorrono (scrub), quindi non possono anche significare "sposta il focus al pulsante
+           adiacente" — le due righe separate lasciano Su/Giù per passare dall'una all'altra,
+           mentre Sinistra/Destra restano liberi per lo scrub quando la timeline ha il focus e per
+           alternare i due pulsanti quando il focus è sulla riga sotto (vedi getRows in app.js). -->
+      <div id="player-timeline" class="timeline" tabindex="0" data-default-focus="true">
+        <!-- Indicatore play/pausa (richiesta utente 2026-09-14: il grosso pulsante ⏯ separato
+             vicino a "Indietro" era ridondante — spostato qui, a inizio timeline, come nei player
+             moderni). Non è un elemento della navigazione a frecce (nessun tabindex, altrimenti
+             getRows() lo tratterebbe come una riga a sé separata dalla timeline, spezzando lo
+             scrub Sinistra/Destra): il telecomando continua a passare da qui con Invio quando la
+             timeline stessa ha il focus (gestito già nel blocco Invio/scrub sotto in questo file),
+             questo click serve solo per il puntatore Magic Remote. -->
+        <div id="player-timeline-playpause" class="timeline-playpause">
+          <svg id="playpause-icon-pause" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"/><rect x="14" y="4" width="4" height="16" rx="1.5"/></svg>
+          <svg id="playpause-icon-play" viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true" class="hidden"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+        <span id="player-time-elapsed" class="timeline-time">0:00</span>
+        <div class="timeline-track">
+          <div id="player-timeline-fill" class="timeline-fill"></div>
+          <div id="player-timeline-thumb" class="timeline-thumb hidden"></div>
+        </div>
+        <span id="player-time-total" class="timeline-time hidden">0:00</span>
+      </div>
+      <!-- Restyle 2026-09-14 (concept "Stremio-style", vedi idee-miglioramento-webos.md): solo
+           stile, nessun cambio di struttura/ordine — .ctrl-ghost sostituisce l'aspetto "pulsante
+           pieno" di .tile-small con pillole quasi trasparenti. Il pulsante Play/Pausa dedicato
+           (.ctrl-hero) è stato rimosso da qui il 2026-09-14 (richiesta utente, ridondante):
+           l'indicatore/toggle vive ora dentro #player-timeline, vedi sopra. getRows()/moveFocus()
+           in app.js non cambiano per questa riga: stesso .controls-row, stessi ID. -->
+      <div class="controls-row">
+        <button class="ctrl ctrl-ghost" data-action="back" tabindex="0">← Indietro</button>
+        <!-- Ripiego manuale "+30s" (piano-webos-skip-marker-plex.md, punto 4): visibile SOLO
+             quando il marker Plex "intro" non è disponibile per questo file (niente Plex Pass,
+             file non ancora processato, o marker disattivati in Impostazioni) — in quel caso non
+             può comparire la pillola "Salta sigla" (vedi sopra la timeline), questo ne prende il
+             posto come unico modo di saltare avanti a mano. Nascosto di default, deciso una sola
+             volta per file da loadPlexMarkers() in app.js, stesso pattern di player-audio-btn. -->
+        <button id="player-skip-btn" class="ctrl ctrl-ghost hidden" data-action="skip-forward" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M4 6l8 6-8 6V6z"/><path d="M13 6l8 6-8 6V6z"/></svg>
+          <span class="ctrl-label">+30s</span>
+        </button>
+        <!-- Stesse due preferenze di Impostazioni (qualità streaming, modalità riproduzione), ma
+             cambiabili al volo durante la visione senza uscire dal player — ogni pressione fa
+             scorrere al valore successivo e ricarica lo stream sulla stessa posizione. -->
+        <button id="player-quality-btn" class="ctrl ctrl-ghost" data-action="cycle-quality" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 18v-4M12 18V9M18 18v-8"/></svg>
+          <span class="ctrl-label">Qualità: …</span>
+        </button>
+        <button id="player-mode-btn" class="ctrl ctrl-ghost" data-action="cycle-mode" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+          <span class="ctrl-label">Modalità: …</span>
+        </button>
+        <!-- Selezione traccia audio (idee-miglioramento-webos.md, restyle player 2026-09-14):
+             nascosto di default, compare da solo quando loadAudioTracks() in app.js scopre che il
+             file ne ha più di una — la maggior parte dei file ne ha una sola, un pulsante sempre
+             visibile che non fa nulla sarebbe solo rumore. -->
+        <button id="player-audio-btn" class="ctrl ctrl-ghost hidden" data-action="cycle-audio" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M4 9v6h4l5 5V4L8 9H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span class="ctrl-label">Audio: …</span>
+        </button>
+        <!-- Salto manuale al prossimo episodio (piano-webos-skip-marker-plex.md, punto 2): visibile
+             solo per le serie TV (mai per i film), nascosto di default finché openPlayer() non sa
+             se currentMediaContext è una serie — stesso pattern di player-audio-btn. Riusa
+             playNextEpisode() già esistente, salta direttamente senza passare dalla pillola con
+             conto alla rovescia (vedi sopra la timeline — quella resta solo per il trigger
+             automatico, da marker Plex "credits" o da fine episodio). -->
+        <button id="player-next-episode-btn" class="ctrl ctrl-ghost hidden" data-action="next-episode" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M6 5l8 7-8 7V5z"/><rect x="16" y="5" width="2.4" height="14"/></svg>
+          <span class="ctrl-label">Prossimo episodio</span>
+        </button>
+      </div>
+      <div id="player-status" class="hint"></div>
+    </div>
+    <!-- Pillole d'azione in alto a destra, sopra la timeline, stile Netflix (richiesta utente
+         2026-09-14) — sostituiscono il vecchio overlay centrale "prossimo episodio" che prendeva il
+         posto dell'intero player (approvato inizialmente nel mockup Player.png, ora superato: qui
+         il video resta visibile e in riproduzione sotto la pillola, esattamente come su Netflix).
+         Compaiono/scompaiono da sole in base al tempo di riproduzione (updateTimelineUI in app.js,
+         marker Plex "intro"/"credits") o all'evento "ended" per il fallback senza marker, e si
+         autofocalizzano appena appaiono: l'utente le trova già pronte, gli basta premere Invio
+         senza doversi spostare col telecomando (richiesta esplicita). Volutamente FUORI da
+         #player-overlay, che sparisce da solo dopo 4s di inattività (showPlayerOverlay) — queste
+         pillole devono restare visibili per tutta la finestra del marker/del conto alla rovescia a
+         prescindere da quanto tempo è fermo il telecomando. Niente tabindex annidati dentro: sono
+         bottoni singoli (Invio/click = azione principale), l'uscita/annullamento passa dal tasto
+         Indietro del telecomando (gestito in app.js, non da un pulsante "✕" separato). -->
+    <div id="player-corner-pills" class="corner-pills">
+      <button id="skip-intro-pill" class="corner-pill hidden" tabindex="0">
+        <div id="skip-intro-pill-fill" class="corner-pill-fill"></div>
+        <div class="corner-pill-body">
+          <div class="corner-pill-label">⏭️ Salta sigla</div>
+        </div>
+      </button>
+      <button id="next-episode-pill" class="corner-pill hidden" tabindex="0">
+        <div id="next-episode-pill-fill" class="corner-pill-fill"></div>
+        <div class="corner-pill-body">
+          <div class="corner-pill-label">Prossimo episodio</div>
+          <div id="next-episode-pill-title" class="corner-pill-title"></div>
+        </div>
+      </button>
+    </div>
+    <!-- Pannello informazioni episodio in pausa (piano-webos-skip-marker-plex.md, Fascia 3, punto
+         8, mockup approvato in docs/Design/Player.png) — mostra/nasconde in sync con gli eventi
+         play/pausa del <video>, stesso meccanismo di #pause-indicator (zero debounce/animazione
+         ritardata: pausa/riprendi rapidi più volte lo mostrano/nascondono ogni volta senza stati
+         intermedi). Dati prefetchati da loadEpisodePanelDetail() all'apertura del player (in
+         parallelo a loadAudioTracks/loadPlexMarkers), non al primo pause: deve comparire già pronto
+         la prima volta, senza un ritardo percepibile per il fetch. Puramente informativo, nessun
+         elemento con tabindex al suo interno: non partecipa in alcun modo al modello a righe di
+         getRows()/moveFocus() in app.js. -->
+    <div id="episode-info-panel" class="episode-panel">
+      <img id="episode-panel-poster" class="episode-panel-poster" alt="" />
+      <div id="episode-panel-title" class="episode-panel-title"></div>
+      <div id="episode-panel-subtitle" class="episode-panel-subtitle"></div>
+      <div id="episode-panel-overview" class="episode-panel-overview"></div>
+      <div id="episode-panel-cast" class="episode-panel-cast"></div>
+    </div>
+  </section>
+
+  <!-- Notifiche in-app (richiesta utente: avviso quando un download finisce) — fuori dalle view
+       normali apposta, così resta visibile sopra qualunque schermata sia aperta in quel momento
+       (vedi pollDownloadNotifications in app.js, gira per tutta la sessione). -->
+  <div id="toast-container" class="toast-container"></div>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>

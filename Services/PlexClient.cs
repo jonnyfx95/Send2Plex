@@ -15,6 +15,11 @@ public class PlexLibraryItem
     public bool IsTv { get; set; }
     public DateTimeOffset AddedAt { get; set; }
     public string? RatingKey { get; set; }
+
+    // Tag "Genre" già presenti nei metadati Plex (nessuna chiamata TMDB in più) — usati per il
+    // filtro "Genere" della pagina Libreria (richiesta utente, come Plex). Vuoto se Plex non ha
+    // ancora indicizzato il titolo con un genere (raro per una libreria matchata).
+    public List<string> Genres { get; set; } = new();
 }
 
 public class PlexEpisodeItem
@@ -22,6 +27,17 @@ public class PlexEpisodeItem
     public int Season { get; set; }
     public int Episode { get; set; }
     public string Title { get; set; } = "";
+    public string? RatingKey { get; set; }
+}
+
+// Marker sigla/titoli di coda rilevati da Plex Pass su un episodio/film (piano-webos-skip-marker-
+// plex.md) — secondi invece di millisecondi al bordo dell'API, coerente con
+// WatchProgressEntry.PositionSeconds già in secondi altrove nel progetto.
+public class PlexMarker
+{
+    public string Type { get; set; } = ""; // "intro" o "credits"
+    public double StartSeconds { get; set; }
+    public double EndSeconds { get; set; }
 }
 
 public class PlexSectionInfo
@@ -76,6 +92,31 @@ public class PlexClient
         return results.All(ok => ok);
     }
 
+    /// <summary>
+    /// Svuota il cestino di una sezione Plex — necessario dopo che un file è sparito dal disco/mount
+    /// (es. cancellazione di un'acquisizione Premiumize, docs/piano-premiumize-libreria.md): un
+    /// semplice <see cref="RefreshAsync"/> segna l'elemento come "nel cestino" ma non lo fa sparire
+    /// dalla UI di Plex, serve questa chiamata in più per farlo sparire davvero.
+    /// </summary>
+    public async Task<bool> EmptyTrashAsync(int sectionId, CancellationToken ct)
+    {
+        var url = $"{_cfg.BaseUrl}/library/sections/{sectionId}/emptyTrash?X-Plex-Token={_cfg.Token}";
+        try
+        {
+            using var http = _httpFactory.CreateClient("PLEX");
+            var resp = await http.PutAsync(url, content: null, ct);
+            if (resp.IsSuccessStatusCode) return true;
+
+            _log.LogWarning("⚠️ Plex emptyTrash fallito per sezione {Id} — Status {Status}", sectionId, resp.StatusCode);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "⚠️ Errore chiamando Plex emptyTrash per sezione {Id}", sectionId);
+            return false;
+        }
+    }
+
     private async Task<bool> RefreshSectionAsync(int sectionId, bool toTv, CancellationToken ct)
     {
         var url = $"{_cfg.BaseUrl}/library/sections/{sectionId}/refresh?X-Plex-Token={_cfg.Token}";
@@ -114,9 +155,17 @@ public class PlexClient
     public async Task<(List<PlexSectionInfo> Movies, List<PlexSectionInfo> Tv)> GetConfiguredSectionsAsync(CancellationToken ct)
     {
         var all = await GetSectionsAsync(ct);
-        var movies = all.Where(s => _cfg.MovieSectionIds.Contains(s.Id)).ToList();
-        var tv = all.Where(s => _cfg.TvSectionIds.Contains(s.Id)).ToList();
-        return (movies, tv);
+
+        // L'ordine segue MovieSectionIds/TvSectionIds così come configurati in Impostazioni
+        // (non l'ordine restituito da Plex, che non è detto coincida) — la prima sezione
+        // configurata diventa quella di default nei selettori "Salva in" di Cerca/AllDebrid.
+        List<PlexSectionInfo> OrderedBy(List<int> ids) => ids
+            .Select(id => all.FirstOrDefault(s => s.Id == id))
+            .Where(s => s is not null)
+            .Select(s => s!)
+            .ToList();
+
+        return (OrderedBy(_cfg.MovieSectionIds), OrderedBy(_cfg.TvSectionIds));
     }
 
     /// <summary>
@@ -241,7 +290,34 @@ public class PlexClient
 
         return metadata
             .Where(m => m.ParentIndex is not null && m.Index is not null)
-            .Select(m => new PlexEpisodeItem { Season = m.ParentIndex!.Value, Episode = m.Index!.Value, Title = m.Title ?? "" })
+            .Select(m => new PlexEpisodeItem { Season = m.ParentIndex!.Value, Episode = m.Index!.Value, Title = m.Title ?? "", RatingKey = m.RatingKey })
+            .ToList();
+    }
+
+    /// <summary>
+    /// Marker sigla/titoli di coda rilevati da Plex Pass per un episodio/film (piano-webos-skip-
+    /// marker-plex.md, Passo 0) — richiede <c>includeMarkers=1</c>, non presente per default nella
+    /// risposta di /library/metadata/{ratingKey}. Lista vuota (mai un'eccezione) se Plex Pass non è
+    /// attivo, il file non è ancora stato processato, o la chiamata fallisce — stesso pattern di
+    /// tolleranza di ogni altro metodo di questa classe.
+    /// </summary>
+    public async Task<List<PlexMarker>> GetMarkersAsync(string ratingKey, CancellationToken ct)
+    {
+        if (!IsConfigured || string.IsNullOrWhiteSpace(ratingKey)) return new List<PlexMarker>();
+
+        var url = $"{_cfg.BaseUrl}/library/metadata/{ratingKey}?includeMarkers=1&X-Plex-Token={_cfg.Token}";
+        var metadata = await FetchMetadataAsync(url, 0, ct);
+        var markers = metadata?.FirstOrDefault()?.Marker;
+        if (markers is null) return new List<PlexMarker>();
+
+        return markers
+            .Where(mk => mk.Type is not null)
+            .Select(mk => new PlexMarker
+            {
+                Type = mk.Type!,
+                StartSeconds = mk.StartTimeOffset / 1000.0,
+                EndSeconds = mk.EndTimeOffset / 1000.0
+            })
             .ToList();
     }
 
@@ -273,7 +349,8 @@ public class PlexClient
         ThumbUrl = m.Thumb is not null ? $"{_cfg.BaseUrl}{m.Thumb}?X-Plex-Token={_cfg.Token}" : null,
         IsTv = toTv,
         AddedAt = m.AddedAt is { } epoch ? DateTimeOffset.FromUnixTimeSeconds(epoch) : DateTimeOffset.MinValue,
-        RatingKey = m.RatingKey
+        RatingKey = m.RatingKey,
+        Genres = m.Genre?.Where(g => g.Tag is not null).Select(g => g.Tag!).ToList() ?? new()
     };
 
     // Per i titoli che Plex non ha ancora abbinato a un poster (appena scaricati, nome file
@@ -374,5 +451,29 @@ public class PlexClient
 
         [JsonPropertyName("theme")]
         public string? Theme { get; set; } // sigla cachata da Plex, se presente
+
+        [JsonPropertyName("Genre")]
+        public List<PlexTagRaw>? Genre { get; set; }
+
+        [JsonPropertyName("Marker")]
+        public List<PlexMarkerRaw>? Marker { get; set; } // presente solo con ?includeMarkers=1
+    }
+
+    private class PlexTagRaw
+    {
+        [JsonPropertyName("tag")]
+        public string? Tag { get; set; }
+    }
+
+    private class PlexMarkerRaw
+    {
+        [JsonPropertyName("type")]
+        public string? Type { get; set; } // "intro" o "credits"
+
+        [JsonPropertyName("startTimeOffset")]
+        public long StartTimeOffset { get; set; } // millisecondi
+
+        [JsonPropertyName("endTimeOffset")]
+        public long EndTimeOffset { get; set; } // millisecondi
     }
 }

@@ -10,10 +10,10 @@
     <p class="page-lede">Elementi accodati da Cerca o da AllDebrid — falli partire tutti insieme quando vuoi.</p>
 
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
-        <button class="btn btn-primary" disabled="@(QueueSvc.IsRunning || QueueSvc.QueuedCount == 0)" @onclick="StartAllAsync">
-            @(QueueSvc.IsRunning ? "In corso…" : "▶️ Avvia tutti")
+        <button class="btn btn-primary" disabled="@(QueueSvc.QueuedCount == 0)" @onclick="StartAllAsync" title="Puoi rilanciarlo anche mentre alcuni elementi sono già in corso: prende solo quelli ancora in coda.">
+            @(QueueSvc.IsRunning ? "▶️ Avvia tutti (in corso…)" : "▶️ Avvia tutti")
         </button>
-        <button class="btn btn-ghost btn-sm" disabled="@QueueSvc.IsRunning" @onclick="() => QueueSvc.ClearCompleted()">Pulisci completati/falliti</button>
+        <button class="btn btn-ghost btn-sm" @onclick="() => QueueSvc.ClearCompleted()">Pulisci completati/falliti/fermati</button>
     </div>
 
     @if (QueueSvc.Items.Count == 0)
@@ -38,19 +38,49 @@
                     @foreach (var item in QueueSvc.Items)
                     {
                         <tr>
-                            <td class="title-cell" data-label="Titolo" title="@item.Title">@item.Title</td>
+                            <td class="title-cell" data-label="Titolo" title="@item.Title">
+                                @item.Title
+                                @if (item.SelectedFileLinks is not null)
+                                {
+                                    <div style="font-size:0.76rem; color:var(--text-dim);">📄 @item.SelectedFileLinks.Count file selezionati</div>
+                                }
+                            </td>
                             <td data-label="Size">@(item.SizeText ?? "?")</td>
                             <td data-label="Fonte">@(item.SourceName ?? "?")</td>
                             <td data-label="Destinazione">@(item.ToTv ? "📺" : "🎬") @(item.DestinationLabel ?? (item.ToTv ? "TV" : "Movies"))</td>
                             <td data-label="Stato">
-                                <span class="badge @StatusBadgeClass(item.Status)">@StatusLabel(item.Status)</span>
-                                @if (!string.IsNullOrWhiteSpace(item.Message))
+                                @if (item.Status == QueuedDownloadStatus.Downloading && item.Percent > 0)
                                 {
-                                    <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">@item.Message</div>
+                                    <div class="dl-progress" style="width:100%; max-width:220px;">
+                                        <div class="dl-progress-fill" style="width:@(Math.Max(6, item.Percent))%"></div>
+                                        <span class="dl-progress-label">@item.Percent.ToString("F0")% · @item.Speed</span>
+                                    </div>
+                                    <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">
+                                        File @item.CurrentFileIndex/@item.TotalFiles — ETA @item.Eta
+                                        @if (!string.IsNullOrWhiteSpace(item.CurrentFileName))
+                                        {
+                                            <span title="@item.CurrentFileName">— @Truncate(item.CurrentFileName, 30)</span>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="badge @StatusBadgeClass(item.Status)">@StatusLabel(item.Status)</span>
+                                    @if (!string.IsNullOrWhiteSpace(item.Message))
+                                    {
+                                        <div style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">@item.Message</div>
+                                    }
                                 }
                             </td>
                             <td data-label="Azioni">
-                                <button class="btn btn-ghost btn-sm" disabled="@(item.Status == QueuedDownloadStatus.Downloading)" @onclick="() => QueueSvc.Remove(item.Id)">Rimuovi</button>
+                                @if (item.Status == QueuedDownloadStatus.Downloading)
+                                {
+                                    <button class="btn btn-ghost btn-sm" title="Ferma questo download (il file parziale viene scartato)" @onclick="() => QueueSvc.Stop(item.Id)">⏹️ Ferma</button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-ghost btn-sm" @onclick="() => QueueSvc.Remove(item.Id)">Rimuovi</button>
+                                }
                             </td>
                         </tr>
                     }
@@ -81,12 +111,15 @@
         await QueueSvc.StartAllAsync(CancellationToken.None);
     }
 
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
+
     private static string StatusLabel(QueuedDownloadStatus status) => status switch
     {
         QueuedDownloadStatus.Queued => "In coda",
         QueuedDownloadStatus.Downloading => "In corso",
         QueuedDownloadStatus.Done => "Completato",
         QueuedDownloadStatus.Failed => "Errore",
+        QueuedDownloadStatus.Cancelled => "Fermato",
         _ => status.ToString()
     };
 
@@ -94,6 +127,7 @@
     {
         QueuedDownloadStatus.Done => "badge-ok",
         QueuedDownloadStatus.Failed => "badge-error",
+        QueuedDownloadStatus.Cancelled => "badge-idle",
         QueuedDownloadStatus.Downloading => "badge-progress",
         _ => "badge-idle"
     };

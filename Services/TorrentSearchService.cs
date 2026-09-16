@@ -4,13 +4,13 @@ using SendToPlex.Bot.Models;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace SendToPlex.Bot.Services;
 
 public class TorrentSearchService
 {
     private readonly HttpClient _http;
-    private readonly BrowserFetcher _browser;
     private readonly NordVpnController _vpn;
     private readonly ILogger<TorrentSearchService> _log;
 
@@ -22,10 +22,9 @@ public class TorrentSearchService
     private readonly SemaphoreSlim _indexCacheLock = new(1, 1);
     private static readonly TimeSpan IndexCacheTtl = TimeSpan.FromHours(6);
 
-    public TorrentSearchService(HttpClient http, BrowserFetcher browser, NordVpnController vpn, ILogger<TorrentSearchService> log)
+    public TorrentSearchService(HttpClient http, NordVpnController vpn, ILogger<TorrentSearchService> log)
     {
         _http = http;
-        _browser = browser;
         _vpn = vpn;
         _log = log;
 
@@ -94,6 +93,9 @@ public class TorrentSearchService
         if (site.UseThePirateBayApi)
             return await SearchThePirateBayApiAsync(site, query, timeoutSeconds, maxResults, ct);
 
+        if (site.UseNyaaRssApi)
+            return await SearchNyaaRssAsync(site, query, timeoutSeconds, maxResults, ct);
+
         if (site.IndexPages.Count > 0)
         {
             using var indexTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -120,11 +122,9 @@ public class TorrentSearchService
             var searchUrl = site.SearchUrlTemplate
                 .Replace("{query}", Uri.EscapeDataString(query))
                 .Replace("{page}", page.ToString());
-            SearchTrace.Write($"[SearchSite] sito={site.Name} query=\"{query}\" pagina={page}/{maxPages} useBrowser={site.UseBrowser} formField={site.SearchFormFieldName ?? "-"} searchUrl={searchUrl}");
+            SearchTrace.Write($"[SearchSite] sito={site.Name} query=\"{query}\" pagina={page}/{maxPages} searchUrl={searchUrl}");
 
-            var html = site.UseBrowser
-                ? await FetchViaBrowserAsync(site, searchUrl, query, timeoutSeconds, timeoutCts.Token)
-                : await GetHtmlAsync(searchUrl, site.Cookie, timeoutCts.Token);
+            var html = await GetHtmlAsync(searchUrl, site.Cookie, timeoutCts.Token);
 
             SearchTrace.Write($"[SearchSite] sito={site.Name} html ricevuto: {html.Length} caratteri");
 
@@ -166,9 +166,7 @@ public class TorrentSearchService
                     SizeText = sizeText,
                     SeedsText = seedsText,
                     SeedsNumeric = ParseSeeds(seedsText),
-                    Cookie = site.Cookie,
-                    UseBrowser = site.UseBrowser,
-                    RevealClickSelector = site.RevealClickSelector
+                    Cookie = site.Cookie
                 };
 
                 if (absoluteLink.StartsWith("magnet:", StringComparison.OrdinalIgnoreCase))
@@ -198,31 +196,23 @@ public class TorrentSearchService
             if (page > 1 && foundOnThisPage == 0) break;
         }
 
-        // Risolvi subito il magnet dalla pagina di dettaglio SOLO per il percorso HTTP leggero
-        // (veloce, nessun effetto collaterale). In modalità browser evitiamo di farlo per ogni
-        // risultato della lista: è lento e, se il sito richiede un click con effetti collaterali
-        // (es. pulsante "Ringrazia"), farlo su tutti i risultati di una ricerca rischia di
-        // sembrare un comportamento da bot e far scattare le protezioni anti-abuso del sito.
-        // Si risolve quindi solo quando l'utente sceglie un risultato specifico
-        // (vedi TelegramWorker.HandleSearchSelectionAsync).
-        if (!site.UseBrowser)
-        {
-            using var detailTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            detailTimeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
+        // Risolvi subito il magnet dalla pagina di dettaglio: veloce, nessun effetto collaterale
+        // (richiesta HTTP semplice, non un click reale su un sito terzo).
+        using var detailTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        detailTimeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
 
-            foreach (var result in results.Where(r =>
-                         r.Magnet is null && r.DetailUrl is not null && !string.IsNullOrWhiteSpace(r.MagnetSelectorOnDetailPage)))
+        foreach (var result in results.Where(r =>
+                     r.Magnet is null && r.DetailUrl is not null && !string.IsNullOrWhiteSpace(r.MagnetSelectorOnDetailPage)))
+        {
+            try
             {
-                try
-                {
-                    var magnets = await ResolveMagnetsFromDetailPageAsync(
-                        result.DetailUrl!, result.MagnetSelectorOnDetailPage!, site.Cookie, site.UseBrowser, site.RevealClickSelector, timeoutSeconds, detailTimeoutCts.Token);
-                    result.Magnet = magnets.FirstOrDefault();
-                }
-                catch (Exception ex)
-                {
-                    _log.LogWarning(ex, "⚠️ Impossibile risolvere il magnet dalla pagina di dettaglio {Url}", result.DetailUrl);
-                }
+                var magnets = await ResolveMagnetsFromDetailPageAsync(
+                    result.DetailUrl!, result.MagnetSelectorOnDetailPage!, site.Cookie, timeoutSeconds, detailTimeoutCts.Token);
+                result.Magnet = magnets.FirstOrDefault();
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "⚠️ Impossibile risolvere il magnet dalla pagina di dettaglio {Url}", result.DetailUrl);
             }
         }
 
@@ -285,8 +275,6 @@ public class TorrentSearchService
         DetailUrl = entry.Url,
         MagnetSelectorOnDetailPage = site.MagnetSelectorOnDetailPage,
         Cookie = site.Cookie,
-        UseBrowser = site.UseBrowser,
-        RevealClickSelector = site.RevealClickSelector,
         SourceListName = indexPage.Name
     };
 
@@ -313,9 +301,7 @@ public class TorrentSearchService
         string html;
         try
         {
-            html = site.UseBrowser
-                ? await _browser.GetRenderedHtmlAsync(indexPage.Url, timeoutSeconds, ct)
-                : await GetHtmlAsync(indexPage.Url, site.Cookie, ct);
+            html = await GetHtmlAsync(indexPage.Url, site.Cookie, ct);
         }
         catch (Exception ex)
         {
@@ -363,73 +349,18 @@ public class TorrentSearchService
     }
 
     /// <summary>
-    /// Recupera l'HTML della pagina di ricerca via browser integrato: se il sito ha un form
-    /// di ricerca POST configurato (<see cref="TorrentSiteConfig.SearchFormFieldName"/>), lo
-    /// compila e invia; altrimenti naviga direttamente all'URL (ricerca via GET).
-    /// </summary>
-    private Task<string> FetchViaBrowserAsync(TorrentSiteConfig site, string searchUrl, string query, int timeoutSeconds, CancellationToken ct)
-    {
-        if (!string.IsNullOrWhiteSpace(site.SearchFormFieldName))
-        {
-            var formPageUrl = string.IsNullOrWhiteSpace(site.SearchFormPageUrl) ? searchUrl : site.SearchFormPageUrl;
-            return _browser.SubmitSearchFormAsync(formPageUrl, site.SearchFormFieldName, query, timeoutSeconds, ct);
-        }
-
-        return _browser.GetRenderedHtmlAsync(searchUrl, timeoutSeconds, ct);
-    }
-
-    /// <summary>
     /// Restituisce TUTTI i magnet trovati sulla pagina di dettaglio (un topic può contenere più
     /// file/versioni: episodi separati, qualità diverse, ecc. — non solo il primo).
     /// </summary>
     public async Task<List<string>> ResolveMagnetsFromDetailPageAsync(
-        string detailUrl, string magnetSelector, string? cookie, bool useBrowser, string? revealClickSelector, int timeoutSeconds, CancellationToken ct)
+        string detailUrl, string magnetSelector, string? cookie, int timeoutSeconds, CancellationToken ct)
     {
-        SearchTrace.Write($"[ResolveMagnet] url={detailUrl} useBrowser={useBrowser} magnetSelector=\"{magnetSelector}\" revealClick=\"{revealClickSelector ?? "-"}\"");
+        SearchTrace.Write($"[ResolveMagnet] url={detailUrl} magnetSelector=\"{magnetSelector}\"");
 
-        if (!useBrowser)
-        {
-            var html = await GetHtmlAsync(detailUrl, cookie, ct);
-            var m = await ExtractMagnetsAsync(html, detailUrl, magnetSelector, ct);
-            SearchTrace.Write($"[ResolveMagnet] (HTTP) trovati: {m.Count}");
-            return m;
-        }
-
-        // Prima un fetch "passivo" (senza click): se il contenuto è già sbloccato — es. "Ringrazia"
-        // già cliccato in passato su questo post — evitiamo del tutto il click: più veloce e non
-        // rischia di somigliare a un comportamento da bot agli occhi del sito. Se questo primo
-        // tentativo fallisce/va in timeout, NON deve bloccare il tentativo con click: proviamo comunque.
-        var magnets = new List<string>();
-        try
-        {
-            var passiveHtml = await _browser.GetRenderedHtmlAsync(detailUrl, Math.Max(timeoutSeconds, 20), ct);
-            SearchTrace.Write($"[ResolveMagnet] fetch passivo: {passiveHtml.Length} caratteri");
-            magnets = await ExtractMagnetsAsync(passiveHtml, detailUrl, magnetSelector, ct);
-        }
-        catch (Exception ex)
-        {
-            SearchTrace.Write($"[ResolveMagnet] fetch passivo fallito ({ex.GetType().Name}: {ex.Message}), tento comunque il click di reveal");
-        }
-
-        if (magnets.Count > 0)
-        {
-            SearchTrace.Write($"[ResolveMagnet] {magnets.Count} magnet già presenti senza click");
-            return magnets;
-        }
-
-        if (string.IsNullOrWhiteSpace(revealClickSelector))
-        {
-            SearchTrace.Write("[ResolveMagnet] nessun magnet e nessun revealClickSelector configurato: mi fermo");
-            return magnets;
-        }
-
-        SearchTrace.Write("[ResolveMagnet] nessun magnet al primo giro, tento il click di reveal");
-        // Naviga di nuovo + clicca + attende un eventuale reload: più lento, serve più margine.
-        var afterClickHtml = await _browser.GetRenderedHtmlAfterClickAsync(detailUrl, revealClickSelector, Math.Max(timeoutSeconds * 2, 30), ct);
-        SearchTrace.Write($"[ResolveMagnet] fetch dopo click: {afterClickHtml.Length} caratteri");
-        var magnetsAfterClick = await ExtractMagnetsAsync(afterClickHtml, detailUrl, magnetSelector, ct);
-        SearchTrace.Write($"[ResolveMagnet] trovati dopo click: {magnetsAfterClick.Count}");
-        return magnetsAfterClick;
+        var html = await GetHtmlAsync(detailUrl, cookie, ct);
+        var m = await ExtractMagnetsAsync(html, detailUrl, magnetSelector, ct);
+        SearchTrace.Write($"[ResolveMagnet] trovati: {m.Count}");
+        return m;
     }
 
     private static async Task<List<string>> ExtractMagnetsAsync(string html, string baseUrl, string magnetSelector, CancellationToken ct)
@@ -486,9 +417,9 @@ public class TorrentSearchService
         return long.TryParse(digits, out var value) ? value : 0;
     }
 
-    // Tracker pubblici standard aggiunti ai magnet costruiti dall'info_hash di apibay.org
-    // (l'API non fornisce un magnet già pronto, solo l'hash — il magnet va composto a mano).
-    private static readonly string[] ThePirateBayTrackers =
+    // Tracker pubblici standard aggiunti ai magnet costruiti da un semplice info_hash (apibay.org
+    // e nyaa.si non forniscono un magnet già pronto, solo l'hash — il magnet va composto a mano).
+    private static readonly string[] PublicMagnetTrackers =
     {
         "udp://tracker.coppersurfer.tk:6969/announce",
         "udp://tracker.opentrackr.org:1337/announce",
@@ -538,7 +469,7 @@ public class TorrentSearchService
 
         if (items is null) return results;
 
-        var trackerQs = string.Concat(ThePirateBayTrackers.Select(t => $"&tr={Uri.EscapeDataString(t)}"));
+        var trackerQs = string.Concat(PublicMagnetTrackers.Select(t => $"&tr={Uri.EscapeDataString(t)}"));
 
         foreach (var item in items)
         {
@@ -560,6 +491,77 @@ public class TorrentSearchService
                 SizeText = FormatBytes(sizeBytes),
                 SeedsText = item.Seeders,
                 SeedsNumeric = ParseSeeds(item.Seeders)
+            });
+        }
+
+        SearchTrace.Write($"[SearchApi] sito={site.Name} risultati: {results.Count}");
+        return results;
+    }
+
+    /// <summary>
+    /// Caso speciale: nyaa.si (specializzato in anime) non ha un'API REST ufficiale, ma espone
+    /// un feed RSS interrogabile con parametri di ricerca (namespace "nyaa:") — strutturato e
+    /// stabile quanto una vera API, niente scraping CSS fragile. Categoria fissata su "Anime"
+    /// (1_0): è l'unico uso previsto di questo sito nell'app.
+    /// </summary>
+    private async Task<List<TorrentSearchResult>> SearchNyaaRssAsync(
+        TorrentSiteConfig site, string query, int timeoutSeconds, int maxResults, CancellationToken ct)
+    {
+        var results = new List<TorrentSearchResult>();
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(Math.Max(5, timeoutSeconds)));
+
+        var url = $"https://nyaa.si/?page=rss&q={Uri.EscapeDataString(query)}&c=1_0&f=0";
+        string xml;
+        try
+        {
+            xml = await _http.GetStringAsync(url, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "⚠️ Errore interrogando il feed RSS di {Site}", site.Name);
+            SearchTrace.Write($"[SearchApi] sito={site.Name} ERRORE: {ex.GetType().Name}: {ex.Message}");
+            return results;
+        }
+
+        SearchTrace.Write($"[SearchApi] sito={site.Name} risposta: {xml.Length} caratteri");
+
+        XDocument doc;
+        try
+        {
+            doc = XDocument.Parse(xml);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "⚠️ Risposta RSS non valida da {Site}", site.Name);
+            return results;
+        }
+
+        XNamespace nyaaNs = "https://nyaa.si/xmlns/nyaa";
+        var trackerQs = string.Concat(PublicMagnetTrackers.Select(t => $"&tr={Uri.EscapeDataString(t)}"));
+
+        foreach (var item in doc.Descendants("item"))
+        {
+            if (results.Count >= maxResults) break;
+
+            var title = item.Element("title")?.Value;
+            var infoHash = item.Element(nyaaNs + "infoHash")?.Value;
+            if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(infoHash))
+                continue;
+
+            var magnet = $"magnet:?xt=urn:btih:{infoHash}&dn={Uri.EscapeDataString(title)}{trackerQs}";
+            var seedsText = item.Element(nyaaNs + "seeders")?.Value;
+            var sizeText = item.Element(nyaaNs + "size")?.Value; // già leggibile, es. "1.2 GiB"
+
+            results.Add(new TorrentSearchResult
+            {
+                SiteName = site.Name,
+                Title = title,
+                Magnet = magnet,
+                SizeText = sizeText,
+                SeedsText = seedsText,
+                SeedsNumeric = ParseSeeds(seedsText)
             });
         }
 

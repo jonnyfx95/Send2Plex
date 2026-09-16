@@ -1,10 +1,8 @@
 @page "/settings"
 @rendermode InteractiveServer
 @implements IDisposable
-@inject BrowserFetcher BrowserFetcher
 @inject PlexClient Plex
 @inject ConfigStore ConfigStore
-@inject LoginStatusChecker LoginChecker
 @inject TelegramWorker Bot
 
 <PageTitle>Send2Plex — Impostazioni</PageTitle>
@@ -25,7 +23,7 @@
         <button class="tab @(activeTab == "percorsi" ? "active" : "")" @onclick='() => activeTab = "percorsi"'>Percorsi</button>
         <button class="tab @(activeTab == "siti" ? "active" : "")" @onclick='() => activeTab = "siti"'>Siti di ricerca</button>
         <button class="tab @(activeTab == "vpn" ? "active" : "")" @onclick='() => activeTab = "vpn"'>VPN</button>
-        <button class="tab @(activeTab == "login" ? "active" : "")" @onclick='() => activeTab = "login"'>Login siti</button>
+        <button class="tab @(activeTab == "streaming" ? "active" : "")" @onclick='() => activeTab = "streaming"'>Streaming</button>
     </div>
 
     @if (activeTab == "stato")
@@ -46,6 +44,9 @@
                 <div class="status-row"><span>Plex</span><span>@(statusResults.Value.Results["Plex"] ? "✅ OK" : "❌ Errore")</span></div>
                 <div class="status-row"><span>Percorsi Movies/TV</span><span>@(statusResults.Value.Results["Paths"] ? "✅ OK" : "❌ Errore")</span></div>
                 <div class="status-row"><span>TMDB</span><span>@(string.IsNullOrWhiteSpace(config.Tmdb.ApiKey) ? "⚠️ Non configurato" : "✅ Chiave presente")</span></div>
+                <div class="status-row"><span>OMDb</span><span>@(string.IsNullOrWhiteSpace(config.Omdb.ApiKey) ? "⚠️ Non configurato (opzionale)" : "✅ Chiave presente")</span></div>
+                <div class="status-row"><span>Real-Debrid</span><span>@(string.IsNullOrWhiteSpace(config.RealDebrid.ApiKey) ? "⚠️ Non configurato (opzionale)" : "✅ Chiave presente")</span></div>
+                <div class="status-row"><span>Premiumize</span><span>@(string.IsNullOrWhiteSpace(config.Premiumize.ApiKey) ? "⚠️ Non configurato (opzionale)" : "✅ Chiave presente")</span></div>
             </div>
         }
         else
@@ -88,11 +89,58 @@
                 </div>
             </div>
             <div class="field">
+                <label>Real-Debrid API Key</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showRealDebridKey ? "text" : "password")" @bind="config.RealDebrid.ApiKey" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showRealDebridKey = !showRealDebridKey">@(showRealDebridKey ? "🙈" : "👁️")</button>
+                </div>
+                <span style="font-size:0.78rem; color:var(--text-dim);">Secondo provider debrid, scelta manuale per singolo file (Cerca/AllDebrid/webOS). Opzionale.</span>
+            </div>
+            <div class="field">
+                <label>Premiumize API Key</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showPremiumizeKey ? "text" : "password")" @bind="config.Premiumize.ApiKey" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showPremiumizeKey = !showPremiumizeKey">@(showPremiumizeKey ? "🙈" : "👁️")</button>
+                </div>
+                <span style="font-size:0.78rem; color:var(--text-dim);">Terzo provider debrid (docs/piano-premiumize-libreria.md), stessa scelta manuale per singolo file. Opzionale.</span>
+            </div>
+            <div class="field">
+                <label>Cartella Premiumize — Film (folder_id)</label>
+                <input class="input" @bind="config.Library.PremiumizeMovieFolderId" placeholder="es. 3DYGWBSVxxe_kkJGjyfC9A" />
+                <span style="font-size:0.78rem; color:var(--text-dim);">Id della cartella "Film" nel tuo cloud Premiumize (si trova nell'URL quando la apri su premiumize.me) — usata dalla pagina Libreria per sfogliarla direttamente, senza mount WebDAV.</span>
+            </div>
+            <div class="field">
+                <label>Cartella Premiumize — Serie TV (folder_id)</label>
+                <input class="input" @bind="config.Library.PremiumizeTvFolderId" placeholder="es. 00ui9rSekHg-ozYGPdE9tg" />
+            </div>
+            <div class="field">
+                <label>Retention libreria Premiumize (giorni)</label>
+                <input class="input" type="number" min="0" style="max-width:120px" @bind="config.Library.RetentionDays" />
+                <span style="font-size:0.78rem; color:var(--text-dim);">Un titolo "Acquisito in libreria" viene cancellato da Premiumize automaticamente solo dopo essere stato guardato per intero (anche non completo, almeno una riproduzione) e trascorsi questi giorni dall'ultima visione.</span>
+            </div>
+            <div class="field">
+                <label>Provider debrid preferito (default)</label>
+                <select class="input" @bind="config.General.PreferredDebridProvider">
+                    <option value="@DebridProvider.AllDebrid">AllDebrid</option>
+                    <option value="@DebridProvider.RealDebrid">Real-Debrid</option>
+                    <option value="@DebridProvider.Premiumize">Premiumize</option>
+                </select>
+                <span style="font-size:0.78rem; color:var(--text-dim);">Pre-seleziona il provider in Cerca/AllDebrid/webOS — resta comunque cambiabile lì per lì.</span>
+            </div>
+            <div class="field">
                 <label>TMDB API Key</label>
                 <div class="secret-field">
                     <input class="input" type="@(showTmdbKey ? "text" : "password")" @bind="config.Tmdb.ApiKey" />
                     <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showTmdbKey = !showTmdbKey">@(showTmdbKey ? "🙈" : "👁️")</button>
                 </div>
+            </div>
+            <div class="field">
+                <label>OMDb API Key</label>
+                <div class="secret-field">
+                    <input class="input" type="@(showOmdbKey ? "text" : "password")" @bind="config.Omdb.ApiKey" />
+                    <button type="button" class="eye-btn" title="Mostra/nascondi" @onclick="() => showOmdbKey = !showOmdbKey">@(showOmdbKey ? "🙈" : "👁️")</button>
+                </div>
+                <span style="font-size:0.78rem; color:var(--text-dim);">Voto IMDb vero nella pagina di dettaglio WebOS (distinto dal voto TMDB). Opzionale.</span>
             </div>
             <div class="field">
                 <label>Plex Base URL</label>
@@ -190,6 +238,34 @@
                 }
             </div>
         }
+
+        @if (plexSections is { Count: > 0 })
+        {
+            <h3 class="section-gap" style="margin-bottom:8px;">Libreria Premiumize di default (webOS)</h3>
+            <p class="page-lede">webOS non ha un selettore libreria per ogni download (a differenza del web) — "📚 Acquisisci in libreria" da NimbusFX usa sempre queste due sezioni di default. Va impostata la sezione la cui cartella (sopra) punta al mount WebDAV di Premiumize.</p>
+            <div class="grid-2 section-gap" style="max-width:700px">
+                <div class="field">
+                    <label>🎬 Film</label>
+                    <select class="input" value="@config.Library.DefaultMovieSectionId" @onchange="e => config.Library.DefaultMovieSectionId = string.IsNullOrEmpty(e.Value?.ToString()) ? null : int.Parse(e.Value.ToString()!)">
+                        <option value="">— Nessuna —</option>
+                        @foreach (var section in plexSections.Where(s => config.Plex.MovieSectionIds.Contains(s.Id)))
+                        {
+                            <option value="@section.Id">@section.Title</option>
+                        }
+                    </select>
+                </div>
+                <div class="field">
+                    <label>📺 Serie TV</label>
+                    <select class="input" value="@config.Library.DefaultTvSectionId" @onchange="e => config.Library.DefaultTvSectionId = string.IsNullOrEmpty(e.Value?.ToString()) ? null : int.Parse(e.Value.ToString()!)">
+                        <option value="">— Nessuna —</option>
+                        @foreach (var section in plexSections.Where(s => config.Plex.TvSectionIds.Contains(s.Id)))
+                        {
+                            <option value="@section.Id">@section.Title</option>
+                        }
+                    </select>
+                </div>
+            </div>
+        }
     }
     else if (activeTab == "siti")
     {
@@ -221,45 +297,32 @@
             </div>
         </div>
     }
-    else if (activeTab == "login")
+    else if (activeTab == "streaming")
     {
-        <p class="page-lede">Alcuni siti richiedono un login manuale per poter cercare. Il click apre una finestra del browser integrato sul PC dove gira l'app — accedi lì, la sessione resta valida tra i riavvii.</p>
-
-        @if (!string.IsNullOrWhiteSpace(loginStatusMessage))
-        {
-            <div class="alert alert-info section-gap">@loginStatusMessage</div>
-        }
-
-        @if (sitesWithLogin.Count == 0)
-        {
-            <p class="page-lede">Nessun sito configurato richiede il login.</p>
-        }
-        else
-        {
-            <div class="panel" style="max-width:600px; padding:6px 20px;">
-                @foreach (var site in sitesWithLogin)
-                {
-                    var state = GetLoginState(site);
-                    <div class="login-row">
-                        <div>
-                            <div>@site.Name</div>
-                            @if (state.Checking)
-                            {
-                                <div style="font-size:0.78rem; color:var(--text-dim);">Verifico…</div>
-                            }
-                            else if (state.Result is not null)
-                            {
-                                <div style="font-size:0.78rem;" title="@state.Result.Detail">@LoginStatusLabel(state.Result.Status)</div>
-                            }
-                        </div>
-                        <div style="display:flex; gap:8px;">
-                            <button class="btn btn-ghost btn-sm" disabled="@state.Checking" @onclick="() => CheckLoginStatusAsync(site)">Verifica stato</button>
-                            <button class="btn btn-ghost btn-sm" @onclick="() => OpenLoginAsync(site)">Login nel browser</button>
-                        </div>
-                    </div>
-                }
+        <p class="page-lede">Impostazioni per "▶️ Guarda in streaming" (Cerca/AllDebrid): riproduzione diretta dal browser senza scaricare il file su disco.</p>
+        <div class="grid-2 section-gap" style="max-width:700px">
+            <div class="field">
+                <label>Encoder per la trascodifica</label>
+                <select class="input" @bind="config.Streaming.Encoder">
+                    <option value="auto">Automatico (rileva l'hardware)</option>
+                    <option value="nvenc">NVIDIA NVENC</option>
+                    <option value="qsv">Intel Quick Sync</option>
+                    <option value="cpu">CPU (software, più lento)</option>
+                </select>
             </div>
-        }
+            <div class="field">
+                <label>Qualità immagine di default</label>
+                <select class="input" @bind="config.Streaming.Quality">
+                    <option value="alta">Alta (risoluzione invariata)</option>
+                    <option value="media">Media (cap 1080p)</option>
+                    <option value="bassa">Bassa (cap 720p, per connessioni/hardware deboli)</option>
+                </select>
+            </div>
+        </div>
+        <p class="page-lede" style="font-size:0.82rem; margin-top:12px;">
+            "Automatico" prova NVIDIA → Intel Quick Sync → CPU, e ripiega comunque su CPU (software) se l'encoder scelto non riesce ad aprirsi.
+            La qualità può anche essere cambiata al volo dalla pagina di riproduzione.
+        </p>
     }
 
     <div class="section-gap">
@@ -284,14 +347,16 @@
     private bool testingStatus;
     private (Dictionary<string, bool> Results, string AllDebridUser, string TelegramUser)? statusResults;
     private string? saveMessage;
-    private string? loginStatusMessage;
     private List<PlexSectionInfo>? plexSections;
     private bool loadingSections;
     private string? sectionsError;
 
     private bool showBotToken;
     private bool showAllDebridKey;
+    private bool showRealDebridKey;
+    private bool showPremiumizeKey;
     private bool showTmdbKey;
+    private bool showOmdbKey;
     private bool showPlexToken;
 
     protected override async Task OnInitializedAsync()
@@ -350,57 +415,6 @@
             existing.Path = path;
         else
             folders.Add(new LibraryFolder { SectionId = sectionId, Name = name, Path = path });
-    }
-
-    private List<TorrentSiteConfig> sitesWithLogin =>
-        config.TorrentSearch.Sites.Where(s => !string.IsNullOrWhiteSpace(s.LoginUrl)).ToList();
-
-    private class LoginState
-    {
-        public bool Checking { get; set; }
-        public LoginStatusResult? Result { get; set; }
-    }
-
-    private readonly Dictionary<string, LoginState> loginStates = new();
-
-    private LoginState GetLoginState(TorrentSiteConfig site)
-    {
-        if (!loginStates.TryGetValue(site.Name, out var state))
-        {
-            state = new LoginState();
-            loginStates[site.Name] = state;
-        }
-        return state;
-    }
-
-    private async Task CheckLoginStatusAsync(TorrentSiteConfig site)
-    {
-        var state = GetLoginState(site);
-        state.Checking = true;
-        state.Result = null;
-        try
-        {
-            state.Result = await LoginChecker.CheckAsync(site, config.TorrentSearch.TimeoutSeconds, CancellationToken.None);
-        }
-        finally
-        {
-            state.Checking = false;
-        }
-    }
-
-    private static string LoginStatusLabel(LoginStatus status) => status switch
-    {
-        LoginStatus.LoggedIn => "✅ Loggato",
-        LoginStatus.LoggedOut => "❌ Non loggato",
-        LoginStatus.Error => "⚠️ Errore durante la verifica",
-        _ => "⚠️ Non verificabile"
-    };
-
-    private async Task OpenLoginAsync(TorrentSiteConfig site)
-    {
-        loginStatusMessage = $"Apro la finestra di login per {site.Name}…";
-        await BrowserFetcher.OpenLoginWindowAsync(site.LoginUrl!);
-        loginStatusMessage = $"Finestra di login per {site.Name} aperta sul PC.";
     }
 
     private void OnChatIdsChanged(ChangeEventArgs e)

@@ -1,0 +1,170 @@
+@page "/guarda"
+@* prerender:false — con il prerendering di default, l'HTML statico e il render interattivo
+   assegnano ENTRAMBI il src del <video>, causando due richieste separate a /stream (e quindi due
+   processi ffmpeg concorrenti per lo stesso file, osservato in pratica): questa pagina va renderizzata
+   una sola volta. *@
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
+@inject ConfigStore ConfigStore
+@inject IJSRuntime JS
+
+<PageTitle>Send2Plex — @(Title ?? "Guarda")</PageTitle>
+
+<div class="page-container">
+    <h1>@(Title ?? "Streaming")</h1>
+    <p class="page-lede">Streaming diretto dal browser, senza scaricare il file su disco.</p>
+
+    @if (string.IsNullOrWhiteSpace(Link))
+    {
+        <div class="alert alert-error section-gap">❌ Nessun file da riprodurre (parametro "link" mancante).</div>
+    }
+    else
+    {
+        <div class="panel section-gap" style="padding:16px;">
+            <video id="s2p-player" controls autoplay style="width:100%; max-height:70vh; background:#000; display:block;" src="@StreamUrl"></video>
+        </div>
+
+        <div class="section-gap" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <span style="font-weight:600; font-size:0.85rem;">Salta a:</span>
+            <button class="btn btn-ghost btn-sm" @onclick="() => SeekAsync(-30)">⏪ 30s</button>
+            <button class="btn btn-ghost btn-sm" @onclick="() => SeekAsync(-10)">⏪ 10s</button>
+            <button class="btn btn-ghost btn-sm" @onclick="() => SeekAsync(10)">10s ⏩</button>
+            <button class="btn btn-ghost btn-sm" @onclick="() => SeekAsync(30)">30s ⏩</button>
+            <span style="color:var(--text-dim); font-size:0.85rem;">Posizione attuale: @FormatTime(baseSeconds)</span>
+        </div>
+        <p style="font-size:0.78rem; color:var(--text-dim); margin-top:4px;">
+            Lo stream è generato al volo: la barra di avanzamento del player non è affidabile per lo spostamento,
+            usa questi pulsanti per saltare avanti/indietro.
+        </p>
+
+        <div class="section-gap" style="display:flex; gap:16px; flex-wrap:wrap;">
+            <div class="field">
+                <label>Qualità</label>
+                <select class="input" style="max-width:160px" value="@quality" @onchange="OnQualityChanged">
+                    <option value="alta">Alta</option>
+                    <option value="media">Media (cap 1080p)</option>
+                    <option value="bassa">Bassa (cap 720p)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Modalità</label>
+                <select class="input" style="max-width:220px" value="@mode" @onchange="OnModeChanged">
+                    <option value="copy">Automatica (prova diretta)</option>
+                    <option value="transcode">Forza trascodifica</option>
+                </select>
+            </div>
+        </div>
+
+        @if (fellBackToTranscode)
+        {
+            <div class="alert alert-info section-gap">ℹ️ Riproduzione diretta non riuscita (o interrotta): passato automaticamente alla trascodifica.</div>
+        }
+    }
+</div>
+
+<script>
+    window.send2plexWatch = {
+        getTime: function (id) {
+            var v = document.getElementById(id);
+            return v ? v.currentTime : 0;
+        },
+        bindError: function (id, dotnetRef) {
+            var v = document.getElementById(id);
+            if (!v) return;
+            v.addEventListener('error', function () {
+                dotnetRef.invokeMethodAsync('OnPlaybackError');
+            });
+        }
+    };
+</script>
+
+@code {
+    [SupplyParameterFromQuery(Name = "link")]
+    private string? Link { get; set; }
+
+    [SupplyParameterFromQuery(Name = "title")]
+    private string? Title { get; set; }
+
+    [SupplyParameterFromQuery(Name = "provider")]
+    private string? Provider { get; set; }
+
+    private const string PlayerId = "s2p-player";
+
+    private string mode = "copy";
+    private string quality = "alta";
+    private double baseSeconds; // posizione (in secondi nel file sorgente) da cui riparte lo stream corrente
+    private int reloadToken;
+    private bool fellBackToTranscode;
+    private DotNetObjectReference<Watch>? selfRef;
+
+    protected override void OnInitialized()
+    {
+        quality = ConfigStore.Current.Streaming.Quality;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !string.IsNullOrWhiteSpace(Link))
+        {
+            selfRef = DotNetObjectReference.Create(this);
+            await JS.InvokeVoidAsync("send2plexWatch.bindError", PlayerId, selfRef);
+        }
+    }
+
+    private string StreamUrl =>
+        $"/stream?link={Uri.EscapeDataString(Link ?? "")}&mode={mode}&quality={quality}" +
+        $"&start={baseSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}&r={reloadToken}" +
+        $"&provider={Uri.EscapeDataString(Provider ?? "allDebrid")}";
+
+    private async Task<double> GetRelativeElapsedAsync()
+    {
+        try { return await JS.InvokeAsync<double>("send2plexWatch.getTime", PlayerId); }
+        catch { return 0; }
+    }
+
+    private async Task SeekAsync(int deltaSeconds)
+    {
+        var elapsed = await GetRelativeElapsedAsync();
+        baseSeconds = Math.Max(0, baseSeconds + elapsed + deltaSeconds);
+        reloadToken++;
+    }
+
+    private async Task OnQualityChanged(ChangeEventArgs e)
+    {
+        var elapsed = await GetRelativeElapsedAsync();
+        baseSeconds = Math.Max(0, baseSeconds + elapsed);
+        quality = e.Value?.ToString() ?? quality;
+        reloadToken++;
+    }
+
+    private async Task OnModeChanged(ChangeEventArgs e)
+    {
+        var elapsed = await GetRelativeElapsedAsync();
+        baseSeconds = Math.Max(0, baseSeconds + elapsed);
+        mode = e.Value?.ToString() ?? mode;
+        reloadToken++;
+    }
+
+    // Chiamato dal browser quando il tag <video> segnala un errore (codec non supportato sul remux
+    // "copy", o connessione interrotta a metà, es. link AllDebrid scaduto): passa alla trascodifica
+    // se non già attiva, e in ogni caso ricarica lo stream (una nuova risoluzione del link AllDebrid
+    // "cura" anche il caso del link scaduto).
+    [JSInvokable]
+    public Task OnPlaybackError()
+    {
+        if (mode != "transcode")
+        {
+            mode = "transcode";
+            fellBackToTranscode = true;
+        }
+        reloadToken++;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private static string FormatTime(double seconds) => TimeSpan.FromSeconds(Math.Max(0, seconds)).ToString(@"hh\:mm\:ss");
+
+    public void Dispose()
+    {
+        selfRef?.Dispose();
+    }
+}

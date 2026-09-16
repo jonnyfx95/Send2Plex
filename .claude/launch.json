@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webos-app-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["webos-app/dev-static-server.js"],
+      "port": 8090
+    }
+  ]
+}
