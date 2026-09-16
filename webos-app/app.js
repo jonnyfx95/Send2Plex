@@ -2080,6 +2080,17 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       btn.textContent = '💾 Guarda da disco';
       btn.addEventListener('click', () => openLocalPlayer(local.localFilePath, title, { tmdbId: candidate.tmdbId, mediaType: 'movie', season: null, episode: null, title: candidate.title }));
       actionEl.appendChild(btn);
+      // Richiesta utente (2026-09-16): il file locale non deve essere l'unica opzione — es. per
+      // cercare una versione con audio/sottotitoli diversi, o qualità migliore, senza dover uscire
+      // dalla scheda e rifare la ricerca testuale da capo. Riusa la stessa openMovieResults() del
+      // ramo "non locale" sotto, nessuna nuova ricerca da scrivere.
+      const searchBtn = document.createElement('button');
+      searchBtn.className = 'tile tile-small';
+      searchBtn.style.marginTop = '12px';
+      searchBtn.tabIndex = 0;
+      searchBtn.textContent = '🔎 Cerca comunque online';
+      searchBtn.addEventListener('click', () => openMovieResults({ tmdbId: candidate.tmdbId, mediaType: 'movie' }, title, candidate.title));
+      actionEl.appendChild(searchBtn);
     } else {
       btn.textContent = '▶️ Guarda';
       btn.addEventListener('click', () => openMovieResults({ tmdbId: candidate.tmdbId, mediaType: 'movie' }, title, candidate.title));
@@ -2110,6 +2121,14 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       if (isLocal) {
         nextBtn.textContent = `💾 Prossimo episodio — S${nextEpisode.season}E${nextEpisode.episode} (da disco)`;
         nextBtn.addEventListener('click', () => openLocalPlayer(nextLocal.localFilePath, `${candidate.title} — S${nextEpisode.season}E${nextEpisode.episode}`, { tmdbId: candidate.tmdbId, mediaType: 'tv', season: nextEpisode.season, episode: nextEpisode.episode, title: candidate.title }));
+        // Stesso principio del ramo film sopra: il file locale non deve essere l'unica opzione.
+        const searchNextBtn = document.createElement('button');
+        searchNextBtn.className = 'tile tile-small';
+        searchNextBtn.style.marginBottom = '24px';
+        searchNextBtn.tabIndex = 0;
+        searchNextBtn.textContent = '🔎 Cerca comunque online';
+        searchNextBtn.addEventListener('click', () => continueToEpisode(candidate, nextEpisode.season, nextEpisode.episode));
+        actionEl.appendChild(searchNextBtn);
       } else {
         nextBtn.addEventListener('click', () => continueToEpisode(candidate, nextEpisode.season, nextEpisode.episode));
       }
@@ -2924,6 +2943,7 @@ function openPlayer(file, title, resumeSeconds) {
   updatePlayerSettingButtons();
   updatePlayerAudioButton(); // nasconde il pulsante finché loadAudioTracks() non scopre le tracce del nuovo file
   updatePlayerNextEpisodeButton();
+  updatePlayerDetailButton();
   updateSkipFallbackButton(); // nasconde "+30s" finché loadPlexMarkers() non sa se c'è un marker "intro"
   reloadReason = 'open';
   loadStream();
@@ -3505,6 +3525,26 @@ function updatePlayerNextEpisodeButton() {
   btn.classList.toggle('hidden', !(currentMediaContext && currentMediaContext.mediaType === 'tv'));
 }
 
+// Idea utente 2026-09-16: dal player si può tornare alla scheda TMDB per scegliere un altro
+// episodio o un'altra fonte, senza uscire dall'app. Nascosto se currentMediaContext non ha un
+// tmdbId noto (es. file aperto da Providers via openMagnet(), che lo azzera apposta).
+function updatePlayerDetailButton() {
+  const btn = document.getElementById('player-detail-btn');
+  if (!btn) return;
+  btn.classList.toggle('hidden', !(currentMediaContext && currentMediaContext.tmdbId != null));
+}
+
+function openDetailFromPlayer() {
+  if (!currentMediaContext || currentMediaContext.tmdbId == null) return;
+  const { tmdbId, mediaType, title } = currentMediaContext;
+  stopPlayer();
+  // stack.pop() invece di popView(): la scheda deve SOSTITUIRE "player" in cima allo stack, non
+  // impilarsi sopra — altrimenti un successivo "Indietro" dalla scheda tornerebbe al player vuoto
+  // invece che a dove si era prima di aprirlo.
+  stack.pop();
+  openCandidate({ tmdbId, mediaType, title });
+}
+
 function showNextEpisodePill(tmdbId, seriesTitle, season, episode, episodeTitle) {
   // Se nel frattempo l'utente è già uscito dal player (Indietro durante il fetch), non fare nulla.
   if (stack[stack.length - 1] !== 'player') return;
@@ -3751,6 +3791,7 @@ document.querySelectorAll('#player-overlay .ctrl').forEach(btn => {
     else if (action === 'cycle-audio') cyclePlayerAudioTrack();
     else if (action === 'next-episode') playNextEpisodeManual();
     else if (action === 'skip-forward') skipForward();
+    else if (action === 'open-detail') openDetailFromPlayer();
   });
 });
 

@@ -358,6 +358,15 @@
            in app.js non cambiano per questa riga: stesso .controls-row, stessi ID. -->
       <div class="controls-row">
         <button class="ctrl ctrl-ghost" data-action="back" tabindex="0">← Indietro</button>
+        <!-- "Torna alla scheda" (idee-miglioramento-webos.md, 2026-09-16): permette di scegliere un
+             altro episodio o un'altra fonte senza uscire dall'app e rifare la ricerca da capo.
+             Nascosto di default, mostrato da updatePlayerDetailButton() in app.js SOLO quando
+             currentMediaContext ha un tmdbId noto (es. non da openMagnet(), che lo azzera apposta
+             per i file scelti a mano dai Providers, senza un titolo TMDB associato). -->
+        <button id="player-detail-btn" class="ctrl ctrl-ghost hidden" data-action="open-detail" tabindex="0">
+          <svg class="ctrl-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><circle cx="12" cy="8" r="1" fill="currentColor" stroke="none"/></svg>
+          <span class="ctrl-label">Scheda</span>
+        </button>
         <!-- Ripiego manuale "+30s" (piano-webos-skip-marker-plex.md, punto 4): visibile SOLO
              quando il marker Plex "intro" non è disponibile per questo file (niente Plex Pass,
              file non ancora processato, o marker disattivati in Impostazioni) — in quel caso non
