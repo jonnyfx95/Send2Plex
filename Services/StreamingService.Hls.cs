@@ -56,6 +56,12 @@ public partial class StreamingService
         // subito (ffprobe), usata per dichiarare una playlist VOD chiusa fin dalla prima
         // richiesta invece di farla crescere segmento per segmento (vedi BuildFullPlaylist).
         public required double RemainingDurationSeconds { get; init; }
+        // Durata REALE di ogni segmento per QUESTO file — dipende dal frame rate del sorgente
+        // (vedi ComputeHlsSegmentSeconds in StreamingService.cs), non è mai un valore fisso
+        // uguale per tutti i file. BUG REALE (2026-09-16): prima era una costante globale
+        // (2.002s, giusta solo per sorgenti a 23.976/24fps) — su un file a 30fps produceva una
+        // playlist con durate dichiarate sbagliate, mandando in loop il player nativo.
+        public required double SegmentSeconds { get; init; }
         public required StreamFileLogger StreamLog { get; init; }
         public required CancellationTokenSource SessionCts { get; init; }
         public Process? CurrentProcess { get; set; }
@@ -210,7 +216,7 @@ public partial class StreamingService
             // questa sessione, a prescindere da quanto ha già prodotto.
             if (startSeconds < candidate.OriginalStartSeconds) continue;
             var relative = startSeconds - candidate.OriginalStartSeconds;
-            var producedSeconds = CountProducedHlsSegments(candidate) * HlsSegmentSeconds;
+            var producedSeconds = CountProducedHlsSegments(candidate) * candidate.SegmentSeconds;
             if (relative > producedSeconds + HlsReuseToleranceSeconds) continue;
             // Tra più candidate valide, preferire quella con OriginalStartSeconds più vicino alla
             // richiesta (meno spreco di segmenti già prodotti ma mai serviti a questo spettatore).
@@ -330,6 +336,7 @@ public partial class StreamingService
             SessionDir = sessionDir,
             OriginalStartSeconds = startSeconds,
             RemainingDurationSeconds = Math.Max(0, (probe.DurationSeconds ?? startSeconds) - startSeconds),
+            SegmentSeconds = ComputeHlsSegmentSeconds(probe.FrameRate),
             StreamLog = streamLog,
             SessionCts = sessionCts,
             CurrentProcess = process,
@@ -405,12 +412,6 @@ public partial class StreamingService
         return (outcome, proc);
     }
 
-    // Durata target di ogni segmento richiesta a ffmpeg (-hls_time 2) — la durata REALE oscilla
-    // leggermente intorno a questo valore (osservato 2.002s con GOP fisso a 48 frame su sorgenti
-    // a 23.976/24fps, mai esattamente 2.0) perché ogni segmento si chiude al keyframe più vicino,
-    // non a un timestamp esatto. Usato qui per dichiarare la playlist sintetica sotto.
-    private const double HlsSegmentSeconds = 2.002;
-
     private Task HlsPlaylistAsync(HttpContext http, string sessionId, CancellationToken ct)
     {
         if (!_hlsSessionsById.TryGetValue(sessionId, out var session) || session.RemovedFlag != 0)
@@ -440,22 +441,26 @@ public partial class StreamingService
 
     private static string BuildFullPlaylist(HlsSession session, double offsetSeconds)
     {
+        var segmentSeconds = session.SegmentSeconds;
         var totalSegments = session.RemainingDurationSeconds > 0
-            ? (int)Math.Ceiling(session.RemainingDurationSeconds / HlsSegmentSeconds)
+            ? (int)Math.Ceiling(session.RemainingDurationSeconds / segmentSeconds)
             : 0;
-        var skip = Math.Clamp((int)(offsetSeconds / HlsSegmentSeconds + 0.0001), 0, totalSegments);
+        var skip = Math.Clamp((int)(offsetSeconds / segmentSeconds + 0.0001), 0, totalSegments);
 
         var sb = new StringBuilder();
         sb.Append("#EXTM3U\n");
         sb.Append("#EXT-X-VERSION:7\n");
-        sb.Append("#EXT-X-TARGETDURATION:2\n");
+        // Deve essere >= alla durata reale di un segmento (spec HLS) — non più un letterale fisso
+        // "2": con SegmentSeconds calcolato dal frame rate reale (vedi ComputeHlsSegmentSeconds)
+        // può superare 2s per sorgenti a frame rate basso.
+        sb.Append("#EXT-X-TARGETDURATION:").Append((int)Math.Ceiling(segmentSeconds)).Append('\n');
         sb.Append("#EXT-X-MAP:URI=\"init.mp4\"\n");
         sb.Append("#EXT-X-MEDIA-SEQUENCE:").Append(skip).Append('\n');
         for (var i = skip; i < totalSegments; i++)
         {
             var duration = i == totalSegments - 1
-                ? Math.Max(0.1, session.RemainingDurationSeconds - i * HlsSegmentSeconds)
-                : HlsSegmentSeconds;
+                ? Math.Max(0.1, session.RemainingDurationSeconds - i * segmentSeconds)
+                : segmentSeconds;
             sb.Append("#EXTINF:").Append(duration.ToString("0.000000", CultureInfo.InvariantCulture)).Append(",\n");
             sb.Append("segment_").Append(i.ToString("D5")).Append(".m4s\n");
         }

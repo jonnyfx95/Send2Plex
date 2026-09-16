@@ -45,6 +45,11 @@ public partial class StreamingService
     // 5.1 = 0x33, copre qualunque risoluzione fino al 4K. High profile = 0x64 (100). Insieme danno
     // sempre lo stesso codec string MSE "avc1.640033", indipendentemente dal file sorgente.
     private const string H264Level51 = "5.1";
+
+    // GOP fisso in FRAME per l'HLS (vedi commento su "-g"/"-keyint_min" in BuildStreamArgs) — la
+    // sua durata REALE in secondi dipende dal frame rate del sorgente, non è mai un valore fisso:
+    // vedi ComputeHlsSegmentSeconds.
+    private const int HlsGopFrames = 48;
     public const string Avc1HighLevel51CodecString = "avc1.640033";
     public const string Mp4aAacLcCodecString = "mp4a.40.2";
 
@@ -571,8 +576,8 @@ public partial class StreamingService
             // "CHUNK_DEMUXER_ERROR_APPEND_FAILED: stream parsing failed" (riprodotto anche in
             // Chrome desktop scaricando l'output ed ispezionandolo a livello di box MP4). Un GOP
             // di 48 frame (~2s) rende ogni frammento piccolo, frequente e quasi innocuo da perdere.
-            args.Add("-g"); args.Add("48");
-            args.Add("-keyint_min"); args.Add("48");
+            args.Add("-g"); args.Add(HlsGopFrames.ToString(CultureInfo.InvariantCulture));
+            args.Add("-keyint_min"); args.Add(HlsGopFrames.ToString(CultureInfo.InvariantCulture));
             args.Add("-sc_threshold"); args.Add("0");
         }
 
@@ -611,9 +616,27 @@ public partial class StreamingService
             args.Add("-c:a"); args.Add("aac"); args.Add("-b:a"); args.Add("192k");
         }
 
-        if (asHls) AddHlsOutput(args); else AddOutput(args);
+        if (asHls) AddHlsOutput(args, ComputeHlsSegmentSeconds(probe.FrameRate)); else AddOutput(args);
         return args;
     }
+
+    // BUG REALE (2026-09-16, "Odissea" 720p HDTS a 30fps): il GOP è fisso in FRAME
+    // (HlsGopFrames), non in secondi — con "-hls_time" fisso a un valore letterale (es. "2") che
+    // non è un multiplo esatto della durata reale del GOP (HlsGopFrames/fps), il muxer HLS di
+    // ffmpeg taglia al primo keyframe utile OLTRE quel target, producendo segmenti realmente più
+    // lunghi/corti e non uniformi (osservato: 30fps → GOP=48/30=1.6s, ma con "-hls_time 2" i
+    // segmenti reali alternavano 1.6s/3.2s). La playlist sintetica servita al player
+    // (BuildFullPlaylist in StreamingService.Hls.cs) dichiarava comunque una durata fissa vicina a
+    // 2s per ognuno — un disallineamento abbastanza grande da mandare in loop il demuxer HLS
+    // nativo webOS (richieste ripetute dello stesso segmento, video mai avanza oltre pochi
+    // secondi). A 23.976/24fps l'errore è piccolo (48/23.976=2.002s, vicino al target "2") ed è
+    // per questo che il problema non si era mai visto prima — sempre esistito, mai innescato.
+    // Fix: passare come "-hls_time" ESATTAMENTE la durata reale del GOP invece di un letterale
+    // fisso, così il muxer taglia a OGNI keyframe (nessuna attesa, nessuna alternanza) e la
+    // playlist sintetica (che usa la stessa funzione, vedi HlsSession.SegmentSeconds) dichiara la
+    // durata vera.
+    private static double ComputeHlsSegmentSeconds(double? frameRate) =>
+        frameRate is > 0 ? HlsGopFrames / frameRate.Value : 2.0;
 
     private static bool IsVideoCompatible(ProbeInfo probe, bool tryVideoCopy, string? scaleFilter, bool forceEncode = false) =>
         !forceEncode &&
@@ -668,10 +691,13 @@ public partial class StreamingService
     // imposta SEMPRE ProcessStartInfo.WorkingDirectory sulla cartella di sessione, quindi qui SOLO
     // nomi relativi — bug #1/#2 del tentativo precedente (percorso assoluto scritto su disco ma
     // non anche nel manifesto, o viceversa) evitati per costruzione.
-    private static void AddHlsOutput(List<string> args)
+    private static void AddHlsOutput(List<string> args, double segmentSeconds)
     {
         args.Add("-f"); args.Add("hls");
-        args.Add("-hls_time"); args.Add("2");
+        // Vedi ComputeHlsSegmentSeconds: DEVE essere la durata reale del GOP per questo file, non
+        // un letterale fisso — altrimenti il muxer produce segmenti non uniformi (bug reale
+        // 2026-09-16, vedi commento lì).
+        args.Add("-hls_time"); args.Add(segmentSeconds.ToString("0.000000", CultureInfo.InvariantCulture));
         // Nessun -hls_playlist_type qui (né "event" né "vod") — testato esplicitamente CON
         // "event" e SENZA, stesso risultato in entrambi i casi: non è quel tag a decidere se il
         // player nativo riproduce o no (vedi sotto per la causa vera). Il file playlist.m3u8 che
@@ -867,9 +893,9 @@ public partial class StreamingService
     // ffprobe
     // ----------------------------------------------------
 
-    private readonly record struct ProbeInfo(string? VideoCodec, bool Is10Bit, bool IsHdr, string? AudioCodec, double? DurationSeconds, IReadOnlyList<AudioTrackInfo> AudioTracks)
+    private readonly record struct ProbeInfo(string? VideoCodec, bool Is10Bit, bool IsHdr, string? AudioCodec, double? DurationSeconds, IReadOnlyList<AudioTrackInfo> AudioTracks, double? FrameRate = null)
     {
-        public static readonly ProbeInfo Unknown = new(null, false, false, null, null, Array.Empty<AudioTrackInfo>());
+        public static readonly ProbeInfo Unknown = new(null, false, false, null, null, Array.Empty<AudioTrackInfo>(), null);
     }
 
     private async Task<ProbeInfo> ProbeAsync(string url, string ffprobePath, CancellationToken ct)
@@ -913,6 +939,7 @@ public partial class StreamingService
 
         using var doc = JsonDocument.Parse(stdout);
         string? videoCodec = null, pixFmt = null, colorTransfer = null, audioCodec = null;
+        double? frameRate = null;
         var audioTracks = new List<AudioTrackInfo>();
 
         if (doc.RootElement.TryGetProperty("streams", out var streams))
@@ -929,6 +956,21 @@ public partial class StreamingService
                     videoCodec = stream.TryGetProperty("codec_name", out var cn) ? cn.GetString() : null;
                     pixFmt = stream.TryGetProperty("pix_fmt", out var pf) ? pf.GetString() : null;
                     colorTransfer = stream.TryGetProperty("color_transfer", out var ctr) ? ctr.GetString() : null;
+                    // "num/den" (es. "24000/1001", "30/1") — serve per calcolare la durata REALE di
+                    // un segmento HLS (vedi ComputeHlsSegmentSeconds): il GOP fisso è in FRAME, non
+                    // in secondi, quindi un frame rate diverso da 23.976/24fps sposta la posizione
+                    // reale dei keyframe.
+                    if (stream.TryGetProperty("r_frame_rate", out var fr) && fr.GetString() is { } frStr)
+                    {
+                        var parts = frStr.Split('/');
+                        if (parts.Length == 2 &&
+                            double.TryParse(parts[0], NumberStyles.Any, CultureInfo.InvariantCulture, out var num) &&
+                            double.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var den) &&
+                            den > 0)
+                        {
+                            frameRate = num / den;
+                        }
+                    }
                 }
                 else if (type == "audio")
                 {
@@ -959,7 +1001,7 @@ public partial class StreamingService
             durationSeconds = dur;
         }
 
-        return new ProbeInfo(videoCodec, is10Bit, isHdr, audioCodec, durationSeconds, audioTracks);
+        return new ProbeInfo(videoCodec, is10Bit, isHdr, audioCodec, durationSeconds, audioTracks, frameRate);
     }
 
     // Usato dal picker traccia audio lato client (nuovo pulsante nel player) — sonda il file PRIMA
