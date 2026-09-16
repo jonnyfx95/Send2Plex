@@ -739,6 +739,31 @@ public static class TvApiEndpoints
             return Results.Json(episodes);
         });
 
+        // Progresso di visione non completato per un titolo, per la scheda (idee-miglioramento-
+        // webos.md, 2026-09-16: "Continua a guardare" deve aprire la scheda, non partire subito
+        // con la riproduzione — ma la scheda deve comunque offrire "Riprendi" come azione
+        // preminente, altrimenti si perde la comodità del tile diretto). Film: voce singola
+        // (TryGet). Serie: l'episodio in corso toccato più di recente (mai un episodio già
+        // completato, quello lo gestisce già "Prossimo episodio" lato client).
+        group.MapGet("/history/resume", (int tmdbId, string mediaType, WatchHistoryService history) =>
+        {
+            WatchProgressEntry? entry = string.Equals(mediaType, "tv", StringComparison.OrdinalIgnoreCase)
+                ? history.GetShowHistory(tmdbId).Where(e => !e.Completed).OrderByDescending(e => e.UpdatedAt).FirstOrDefault()
+                : history.TryGet("movie", tmdbId, null, null) is { Completed: false } m ? m : null;
+
+            if (entry is null) return Results.Json((object?)null);
+            return Results.Json(new
+            {
+                season = entry.Season,
+                episode = entry.Episode,
+                positionSeconds = entry.PositionSeconds,
+                durationSeconds = entry.DurationSeconds,
+                fileLink = entry.FileLink,
+                fileName = entry.FileName,
+                provider = entry.Provider
+            });
+        });
+
         // Titoli degli episodi di una stagione — usato per mostrare il titolo vero invece del solo
         // "S01E01" in "Continua a guardare"/"Prossimo episodio" (richiesta utente).
         group.MapGet("/search/episodes", async (int tmdbId, int season, TmdbClient tmdb, CancellationToken ct) =>

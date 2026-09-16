@@ -1066,24 +1066,15 @@ async function loadContinueWatchingRail(mediaType, sectionId, railId) {
 
 // Riapre direttamente il player dal file/posizione salvati — nessuna nuova ricerca, il link
 // AllDebrid stabile (fileLink) e il contesto tmdbId/stagione/episodio sono già nella cronologia.
+// Idea utente 2026-09-16 (idee-miglioramento-webos.md): un tap su "Continua a guardare" non deve
+// più avviare subito la riproduzione — porta invece alla scheda del titolo, che mostra "▶️
+// Riprendi" come azione preminente (vedi renderDetail/fetchResumeInfo) così l'utente può anche
+// scegliere un altro episodio o un'altra fonte prima di riprendere. currentDetailBackdrop non va
+// più impostato qui: lo fa già renderDetail() con gli stessi dati (posterUrl/backdropUrl) appena
+// arriva la risposta di /search/detail.
 function resumeFromHistory(item) {
   if (!item.fileLink) return;
-  // "title" qui è item.title (nome pulito, es. "Lanterns") — mai il titolo composto costruito
-  // sotto per lo schermo del player, altrimenti il prossimo reportProgress() lo salverebbe di
-  // nuovo come titolo "pulito", reintroducendo la stessa impilazione ad ogni resume successivo.
-  currentMediaContext = { tmdbId: item.tmdbId, mediaType: item.mediaType, season: item.season, episode: item.episode, title: item.title };
-  // BUG REALE (2026-09-14, segnalato dall'utente): questo è l'unico punto d'ingresso al player che
-  // salta del tutto la pagina di dettaglio (openCandidate, che altrove aggiorna
-  // currentDetailBackdrop) — senza questa riga lo sfondo TMDB nel player restava quello
-  // dell'ultimo titolo visitato via dettaglio (o "none" se la sessione non era mai passata da lì),
-  // sbagliato per tutta la visione (compresi i reload dei salti avanti/indietro, che riusano lo
-  // stesso sfondo impostato una volta sola). Il backend arricchisce già /history/continue-watching
-  // con backdropUrl/posterUrl apposta per questo (vedi TvApiEndpoints.cs), bastava usarli.
-  currentDetailBackdrop = item.backdropUrl || item.posterUrl || null;
-  const label = item.mediaType === 'tv' && item.episode
-    ? ` · ${item.episodeTitle || `S${item.season}E${item.episode}`}`
-    : '';
-  openPlayer({ name: item.fileName, link: item.fileLink, size: 0, provider: item.provider || 'allDebrid' }, `${item.title}${label}`, item.positionSeconds);
+  openCandidate({ tmdbId: item.tmdbId, mediaType: item.mediaType, title: item.title });
 }
 
 // Titolo vero di un episodio (TMDB) invece del solo "S01E01" — usato da "Continua a guardare"
@@ -1728,6 +1719,26 @@ async function continueToEpisode(candidate, season, episode) {
 // deve partire dal file locale, mai da una ricerca/sblocco torrent) — anche da
 // checkLocalFileForVersionList più sotto, per il caso in cui l'utente sia comunque arrivato alla
 // lista versioni (es. da una ricerca testuale libera, non dalla libreria).
+// Progresso di visione non completato per la scheda (idea utente 2026-09-16) — null se il titolo
+// non è mai stato iniziato o è già stato completato (>=90%, vedi WatchHistoryService.cs).
+async function fetchResumeInfo(tmdbId, mediaType) {
+  try {
+    const res = await fetch(`${apiBase()}/api/tv/history/resume?tmdbId=${tmdbId}&mediaType=${mediaType}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// "mm:ss rimasti" per il pulsante "Riprendi" — arrotondato al minuto, coerente con le altre durate
+// mostrate in scheda (es. "112 min" per il runtime).
+function formatRemaining(positionSeconds, durationSeconds) {
+  const remaining = Math.max(0, (durationSeconds || 0) - (positionSeconds || 0));
+  const minutes = Math.round(remaining / 60);
+  return minutes > 0 ? `${minutes} min rimasti` : null;
+}
+
 async function fetchLocalStatus(mediaType, cleanTitle, season, episode) {
   try {
     const params = new URLSearchParams({ mediaType, title: cleanTitle });
@@ -2072,9 +2083,31 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
     // Richiesta utente (2026-09-13): controllato PRIMA di decidere l'azione principale, non dopo
     // — passando dalla libreria Plex il file è già sul disco, il pulsante deve riprodurlo
     // direttamente invece di rimandare sempre a una ricerca/sblocco torrent.
-    const local = await fetchLocalStatus('movie', candidate.title, null, null);
+    const [local, resume] = await Promise.all([
+      fetchLocalStatus('movie', candidate.title, null, null),
+      fetchResumeInfo(candidate.tmdbId, 'movie')
+    ]);
+    // Idea utente 2026-09-16: "Continua a guardare" ora porta qui invece che dritto al player
+    // (vedi resumeFromHistory) — "Riprendi" deve restare l'azione preminente, altrimenti si perde
+    // la comodità del tile diretto. Riapre lo stesso file già in cronologia (locale se lo è ancora
+    // diventato nel frattempo, altrimenti il fileLink/provider salvati — stesso principio di
+    // resumeFromHistory di prima) sulla posizione salvata.
+    if (resume) {
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'tile tile-primary';
+      resumeBtn.tabIndex = 0;
+      const remaining = formatRemaining(resume.positionSeconds, resume.durationSeconds);
+      resumeBtn.textContent = `▶️ Riprendi${remaining ? ` — ${remaining}` : ''}`;
+      const ctx = { tmdbId: candidate.tmdbId, mediaType: 'movie', season: null, episode: null, title: candidate.title };
+      resumeBtn.addEventListener('click', () => {
+        if (local && local.hasLocalFile) openLocalPlayer(local.localFilePath, title, ctx, resume.positionSeconds);
+        else openPlayer({ name: resume.fileName, link: resume.fileLink, size: 0, provider: resume.provider || 'allDebrid' }, title, resume.positionSeconds);
+      });
+      actionEl.appendChild(resumeBtn);
+    }
     const btn = document.createElement('button');
-    btn.className = 'tile tile-primary';
+    btn.className = resume ? 'tile tile-small' : 'tile tile-primary';
+    if (resume) btn.style.marginTop = '12px';
     btn.tabIndex = 0;
     if (local && local.hasLocalFile) {
       btn.textContent = '💾 Guarda da disco';
@@ -2104,7 +2137,29 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
     }
   } else {
     const seasons = detail.seasons || [];
-    const nextEpisode = computeNextEpisode(seasons, watchedEpisodes);
+    // Idea utente 2026-09-16: se c'è un episodio IN CORSO (non completato), "Riprendi" ha priorità
+    // su "Prossimo episodio" — computeNextEpisode sotto ragiona solo sull'ultimo episodio
+    // COMPLETATO, quindi da solo non saprebbe distinguere "in corso" da "mai iniziato".
+    const resume = await fetchResumeInfo(candidate.tmdbId, 'tv');
+    if (resume) {
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'tile tile-primary';
+      resumeBtn.tabIndex = 0;
+      resumeBtn.style.marginBottom = '24px';
+      const remaining = formatRemaining(resume.positionSeconds, resume.durationSeconds);
+      resumeBtn.textContent = `▶️ Riprendi — S${resume.season}E${resume.episode}${remaining ? ` (${remaining})` : ''}`;
+      const ctx = { tmdbId: candidate.tmdbId, mediaType: 'tv', season: resume.season, episode: resume.episode, title: candidate.title };
+      resumeBtn.addEventListener('click', async () => {
+        const resumeLocal = await fetchLocalStatus('tv', candidate.title, resume.season, resume.episode);
+        if (resumeLocal && resumeLocal.hasLocalFile) openLocalPlayer(resumeLocal.localFilePath, `${candidate.title} — S${resume.season}E${resume.episode}`, ctx, resume.positionSeconds);
+        else openPlayer({ name: resume.fileName, link: resume.fileLink, size: 0, provider: resume.provider || 'allDebrid' }, `${candidate.title} — S${resume.season}E${resume.episode}`, resume.positionSeconds);
+      });
+      actionEl.appendChild(resumeBtn);
+      fetchEpisodeTitle(candidate.tmdbId, resume.season, resume.episode).then(name => {
+        if (name) resumeBtn.textContent = `▶️ Riprendi: S${resume.season}E${resume.episode} · ${name}${remaining ? ` (${remaining})` : ''}`;
+      });
+    }
+    const nextEpisode = resume ? null : computeNextEpisode(seasons, watchedEpisodes);
     if (nextEpisode) {
       const nextBtn = document.createElement('button');
       nextBtn.className = 'tile tile-primary';
@@ -2434,9 +2489,9 @@ async function checkLocalFileForVersionList(mediaType, cleanTitle, season, episo
 // DOWNLOAD (vero, il file c'è già), ma il PROGRESSO di visione va comunque salvato, altrimenti
 // "Continua a guardare" non si popola mai per i titoli già posseduti (segnalato dall'utente
 // 2026-09-14: "non ha senso non riprendere solo perché il file è locale").
-function openLocalPlayer(path, title, mediaContext) {
+function openLocalPlayer(path, title, mediaContext, resumeSeconds) {
   currentMediaContext = mediaContext || null;
-  openPlayer({ name: title, link: path, size: 0, provider: 'local' }, title, 0);
+  openPlayer({ name: title, link: path, size: 0, provider: 'local' }, title, resumeSeconds || 0);
 }
 
 // Toggle di pagina per la lista versioni (Punto UI ibrida, vedi piano-multi-provider-debrid.md):
