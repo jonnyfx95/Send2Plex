@@ -10,12 +10,22 @@ using SendToPlex.Bot.Models;
 namespace SendToPlex.Bot.Services;
 
 /// <summary>
-/// Streaming HLS segmentato (docs/piano-streaming-multiutente-hls.md, Fase 2) — ANCORA un solo
-/// spettatore per file (come il pipe MP4 esistente in StreamingService.cs, invariato): questa
-/// fase riscrive SOLO il trasporto (segmenti su disco invece di un pipe continuo), non ancora la
-/// condivisione multi-utente (Fase 3, cambio mirato e separato). Endpoint completamente nuovi
-/// (`/stream/hls*`), nessuna modifica al percorso `/stream` esistente — coesistono, l'app webOS
-/// non chiama ancora questi endpoint (arriverà con la Fase 4).
+/// Streaming HLS segmentato (docs/piano-streaming-multiutente-hls.md, Fase 2/3/4) — a differenza
+/// del pipe MP4 esistente in StreamingService.cs (che resta "un solo spettatore per file", non
+/// toccato), qui PIÙ richieste per lo stesso file+config possono condividere la STESSA sessione
+/// ffmpeg (Fase 3) quando la posizione richiesta è già (o sta per essere) coperta da una sessione
+/// esistente — vedi FindReusableHlsSessionLocked.
+///
+/// BUG REALE (2026-09-16, docs/piano-tonemap-gpu.md, Fase 2): un salto FUORI dalla finestra di
+/// riuso (HlsReuseToleranceSeconds) creava una sessione nuova ma lasciava quella vecchia viva fino
+/// a HlsInactivityTimeout (45s) — sulla stessa GPU, un tone-mapping HDR "zombie" ancora in corso
+/// rallentava visibilmente quello nuovo (osservato: da 4-5x a 2,7x, blocco di alcuni secondi ad
+/// ogni avanti/indietro, meno marcato ma non assente su contenuto leggero). Confermato con
+/// l'utente che l'uso reale è sempre UN solo spettatore alla volta (mai due dispositivi sullo
+/// stesso file in contemporanea) — TerminateOtherHlsSessionsForFileLocked (sotto) chiude subito
+/// le altre sessioni per lo stesso file, esattamente come il pipe MP4 fa da sempre. Se in futuro
+/// il multi-utente sullo stesso identico file dovesse servire davvero, va ripensata (es. un id
+/// di dispositivo per distinguere "abbandonata da un seek" da "ancora guardata da qualcun altro").
 /// </summary>
 public partial class StreamingService
 {
@@ -35,6 +45,10 @@ public partial class StreamingService
     {
         public required string Id { get; init; }
         public required string Key { get; init; }
+        // Come Key ma senza il bucket di partenza (vedi BuildHlsConfigKey) — usata per trovare
+        // sessioni condivisibili tra spettatori che chiedono posizioni diverse dello STESSO file
+        // nella STESSA configurazione (qualità/audio/modalità), il cuore della Fase 3.
+        public required string ConfigKey { get; init; }
         public required string FileLink { get; init; }
         public required string SessionDir { get; init; }
         public required double OriginalStartSeconds { get; init; }
@@ -126,14 +140,24 @@ public partial class StreamingService
         var reason = req.Query["reason"].ToString();
         if (string.IsNullOrWhiteSpace(reason)) reason = "sconosciuto";
 
-        var key = BuildSessionKey(fileLink, mode, quality, forceEncode, startSeconds, isLocal ? "local" : provider.ToString(), audioIndex);
+        var providerTag = isLocal ? "local" : provider.ToString();
+        var key = BuildSessionKey(fileLink, mode, quality, forceEncode, startSeconds, providerTag, audioIndex);
+        var configKey = BuildHlsConfigKey(fileLink, mode, quality, forceEncode, providerTag, audioIndex);
 
         HlsSession? session;
         await _hlsSetupGate.WaitAsync(ct);
         try
         {
+            // Percorso rapido: stesso identico bucket di partenza già visto (lo stesso client che
+            // ricarica/naviga vicino a dove si trovava, come in Fase 2) — nessuna scansione.
             session = GetReattachableHlsSessionLocked(key);
-            session ??= await CreateHlsSessionLockedAsync(http, key, fileLink, mode, isCopyMode, quality, encoderSetting, forceEncode, startSeconds, provider, isLocal, audioIndex, reason, ct);
+            // Fase 3: nessun match esatto, ma magari una sessione già in corso per lo STESSO
+            // file+config (qualità/audio/modalità) può già coprire (o quasi) la posizione
+            // richiesta — es. un secondo dispositivo che guarda lo stesso episodio, o lo stesso
+            // spettatore che ha fatto un piccolo salto in avanti oltre il bucket. Riusarla evita
+            // un secondo processo ffmpeg a leggere lo stesso file.
+            session ??= FindReusableHlsSessionLocked(configKey, startSeconds);
+            session ??= await CreateHlsSessionLockedAsync(http, key, configKey, fileLink, mode, isCopyMode, quality, encoderSetting, forceEncode, startSeconds, provider, isLocal, audioIndex, reason, ct);
         }
         finally
         {
@@ -157,20 +181,53 @@ public partial class StreamingService
         return null;
     }
 
-    private void TerminateOtherHlsSessionsForFileLocked(string fileLink, string keepKey)
+    // Chiave "di configurazione" — come BuildSessionKey ma SENZA il bucket di partenza: due
+    // richieste con questa chiave uguale vogliono lo stesso file, nella stessa qualità/traccia
+    // audio/modalità, e quindi POSSONO condividere la stessa sessione ffmpeg (Fase 3) anche se
+    // la posizione di partenza richiesta non è identica.
+    private static string BuildHlsConfigKey(string link, string mode, string quality, bool forceEncode, string providerTag, int audioIndex)
+        => $"{link}|{mode}|{quality}|{forceEncode}|{providerTag}|a{audioIndex}";
+
+    // Margine di tolleranza oltre quanto già prodotto entro cui vale la pena riusare una sessione
+    // esistente invece di aprirne una nuova — coerente con l'attesa già tollerata da HlsFileAsync
+    // per un segmento non ancora pronto (fino a 30s), ma più prudente: oltre questa soglia il
+    // vantaggio di condividere il processo ffmpeg è superato dal ritardo imposto al nuovo
+    // spettatore, meglio un secondo processo che parte subito dal punto giusto (-ss diretto).
+    private const double HlsReuseToleranceSeconds = 20;
+
+    private int CountProducedHlsSegments(HlsSession session)
+        => Directory.Exists(session.SessionDir) ? Directory.EnumerateFiles(session.SessionDir, "segment_*.m4s").Count() : 0;
+
+    private HlsSession? FindReusableHlsSessionLocked(string configKey, double startSeconds)
     {
-        foreach (var kvp in _hlsSessionsByKey)
+        HlsSession? best = null;
+        foreach (var candidate in _hlsSessionsById.Values)
         {
-            if (kvp.Key == keepKey || !string.Equals(kvp.Value.FileLink, fileLink, StringComparison.Ordinal)) continue;
-            kvp.Value.StreamLog.Log("⏹️ sessione HLS terminata: una nuova sessione per lo stesso file ha preso il suo posto");
-            RemoveHlsSession(kvp.Value, "superata da una nuova sessione HLS per lo stesso file");
+            if (candidate.RemovedFlag != 0) continue;
+            if (!string.Equals(candidate.ConfigKey, configKey, StringComparison.Ordinal)) continue;
+            // La playlist di una sessione copre solo da OriginalStartSeconds in poi (vedi
+            // BuildFullPlaylist) — una posizione richiesta PRIMA di quel punto non è servibile da
+            // questa sessione, a prescindere da quanto ha già prodotto.
+            if (startSeconds < candidate.OriginalStartSeconds) continue;
+            var relative = startSeconds - candidate.OriginalStartSeconds;
+            var producedSeconds = CountProducedHlsSegments(candidate) * HlsSegmentSeconds;
+            if (relative > producedSeconds + HlsReuseToleranceSeconds) continue;
+            // Tra più candidate valide, preferire quella con OriginalStartSeconds più vicino alla
+            // richiesta (meno spreco di segmenti già prodotti ma mai serviti a questo spettatore).
+            if (best is null || candidate.OriginalStartSeconds > best.OriginalStartSeconds) best = candidate;
         }
+        if (best is not null)
+            best.StreamLog.Log($"👥 nuovo spettatore agganciato alla sessione HLS esistente (condivisione, start richiesto={startSeconds:n1}s)");
+        return best;
     }
 
-    private async Task<HlsSession?> CreateHlsSessionLockedAsync(HttpContext http, string key, string fileLink, string mode, bool isCopyMode, string quality, string encoderSetting, bool forceEncode, double startSeconds, DebridProvider provider, bool isLocal, int audioIndex, string reason, CancellationToken ct)
+    private async Task<HlsSession?> CreateHlsSessionLockedAsync(HttpContext http, string key, string configKey, string fileLink, string mode, bool isCopyMode, string quality, string encoderSetting, bool forceEncode, double startSeconds, DebridProvider provider, bool isLocal, int audioIndex, string reason, CancellationToken ct)
     {
-        // Stessa regola del pipe MP4 (vedi CreateSessionLockedAsync): un solo spettatore per
-        // file, niente due processi ffmpeg a leggere lo stesso file in parallelo.
+        // Si arriva qui solo se GetReattachableHlsSessionLocked/FindReusableHlsSessionLocked (sopra)
+        // non hanno trovato nulla di riusabile: la posizione richiesta è troppo lontana da
+        // qualunque sessione esistente per lo stesso file. Prima di aprirne una nuova, chiudiamo
+        // subito quelle vecchie per lo STESSO file invece di lasciarle scadere dopo
+        // HlsInactivityTimeout (45s) — vedi il bug reale descritto nel commento di classe più sopra.
         TerminateOtherHlsSessionsForFileLocked(fileLink, key);
 
         string directUrl;
@@ -227,6 +284,9 @@ public partial class StreamingService
 
         var sessionCts = new CancellationTokenSource();
 
+        // docs/piano-tonemap-gpu.md, Fase 2 — stesso principio del pipe MP4 (StreamAsync).
+        var canUseGpuTonemap = probe.IsHdr && (encoderName == "h264_nvenc" || encoderName == "hevc_nvenc");
+
         var args = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: isCopyMode, forceEncode, audioIndex, asHls: true);
         streamLog.Log($"ffmpeg (cwd={sessionDir}) {string.Join(' ', args)}");
         var (outcome, process) = await StartFfmpegForHlsAsync(ffmpegPath, args, sessionDir, sessionCts.Token, streamLog);
@@ -237,6 +297,13 @@ public partial class StreamingService
             var forcedArgs = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: false, forceEncode, audioIndex, asHls: true);
             streamLog.Log($"ffmpeg (retry, trascodifica forzata) {string.Join(' ', forcedArgs)}");
             (outcome, process) = await StartFfmpegForHlsAsync(ffmpegPath, forcedArgs, sessionDir, sessionCts.Token, streamLog);
+        }
+        if (outcome == RunResult.FailedBeforeAnyBytes && canUseGpuTonemap)
+        {
+            streamLog.Log("⚠️ tone-mapping GPU (HLS) fallito ad aprirsi, ripiego sulla catena CPU (zscale/tonemap) per l'HDR");
+            var cpuTonemapArgs = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: false, forceEncode, audioIndex, asHls: true, useGpuTonemap: false);
+            streamLog.Log($"ffmpeg (retry, tonemap CPU) {string.Join(' ', cpuTonemapArgs)}");
+            (outcome, process) = await StartFfmpegForHlsAsync(ffmpegPath, cpuTonemapArgs, sessionDir, sessionCts.Token, streamLog);
         }
         if (outcome == RunResult.FailedBeforeAnyBytes && !string.Equals(encoderName, "libx264", StringComparison.OrdinalIgnoreCase))
         {
@@ -258,6 +325,7 @@ public partial class StreamingService
         {
             Id = id,
             Key = key,
+            ConfigKey = configKey,
             FileLink = fileLink,
             SessionDir = sessionDir,
             OriginalStartSeconds = startSeconds,
@@ -461,6 +529,19 @@ public partial class StreamingService
             if (session.RemovedFlag != 0) continue;
             if (now - session.LastRequestAtUtc > HlsInactivityTimeout)
                 RemoveHlsSession(session, $"nessuna richiesta playlist/segmenti da {HlsInactivityTimeout.TotalSeconds:n0}s (inattività)");
+        }
+    }
+
+    // Chiamato solo da CreateHlsSessionLockedAsync, quindi sempre con _hlsSetupGate già acquisito
+    // (niente race con un'altra creazione per lo stesso file). Stesso principio di
+    // TerminateOtherSessionsForFileLocked nel pipe MP4 (StreamingService.cs).
+    private void TerminateOtherHlsSessionsForFileLocked(string fileLink, string keepKey)
+    {
+        foreach (var kvp in _hlsSessionsById)
+        {
+            var session = kvp.Value;
+            if (session.Key == keepKey || session.RemovedFlag != 0 || !string.Equals(session.FileLink, fileLink, StringComparison.Ordinal)) continue;
+            RemoveHlsSession(session, "superata da una nuova sessione HLS per lo stesso file (niente più attesa dei 45s di inattività)");
         }
     }
 

@@ -478,7 +478,7 @@ public partial class StreamingService
     // passthrough audio multicanale via TS, niente bypass DirectPlay) per isolare i bug del nuovo
     // trasporto da qualunque altro comportamento — stesso principio già seguito per Fase 2 vs
     // Fase 3 nel piano.
-    private static List<string> BuildStreamArgs(string url, double startSeconds, ProbeInfo probe, string quality, string encoderName, bool tryVideoCopy, bool forceEncode = false, int audioIndex = 0, bool asHls = false)
+    private static List<string> BuildStreamArgs(string url, double startSeconds, ProbeInfo probe, string quality, string encoderName, bool tryVideoCopy, bool forceEncode = false, int audioIndex = 0, bool asHls = false, bool useGpuTonemap = true)
     {
         // La traccia scelta può avere un codec diverso da probe.AudioCodec (che è sempre quello
         // della PRIMA traccia, per compatibilità con il resto di questo metodo) — la decisione
@@ -490,6 +490,14 @@ public partial class StreamingService
             : probe.AudioCodec;
         var (cq, scaleFilter, maxrate, bufsize) = QualityPreset(quality);
         var videoCompatible = IsVideoCompatible(probe, tryVideoCopy, scaleFilter, forceEncode);
+        // docs/piano-tonemap-gpu.md, Fase 1 validata (2026-09-16): tone-mapping HDR via GPU
+        // (libplacebo/Vulkan) invece della catena CPU zscale/tonemap — stessa qualità colore
+        // (PSNR ~46dB/SSIM ~0.98 contro la catena CPU sulla stessa scena scura) e +55-57% di
+        // velocità di crociera. Richiede NVENC (per restare coerenti con l'hwaccel NVIDIA già in
+        // uso) — su altri encoder resta sempre la catena CPU. useGpuTonemap=false è il ripiego
+        // usato dal chiamante (StreamAsync/StreamHlsAsync) se il primo tentativo GPU fallisce ad
+        // aprirsi (es. Vulkan assente su una macchina diversa da questa).
+        var attemptGpuTonemap = useGpuTonemap && probe.IsHdr && (encoderName == "h264_nvenc" || encoderName == "hevc_nvenc");
 
         // "-progress pipe:2 -stats_period 5": telemetria periodica (speed/out_time) sullo stesso
         // stderr già letto riga per riga — senza questa, i log server non permettono di distinguere
@@ -509,7 +517,13 @@ public partial class StreamingService
             // hardware (NVDEC): "-hwaccel cuda" lo attiva mantenendo l'output in memoria di sistema
             // (nessun hwaccel_output_format cuda), così la catena di filtri CPU (zscale/tonemap)
             // continua a funzionare invariata sui frame decodificati.
-            args.Add("-hwaccel"); args.Add("cuda");
+            //
+            // Per il ramo GPU tonemap (attemptGpuTonemap) serve invece "-hwaccel vulkan": il
+            // decode avviene già come frame Vulkan, così libplacebo (sotto, in BuildVideoFilter)
+            // opera sul frame senza mai scaricarlo in RAM di sistema — nessun "-init_hw_device"
+            // esplicito necessario, ffmpeg crea da solo il device Vulkan di default (verificato
+            // nello spike di Fase 1).
+            args.Add("-hwaccel"); args.Add(attemptGpuTonemap ? "vulkan" : "cuda");
         }
         AddSeek(args, startSeconds);
         args.Add("-i"); args.Add(url);
@@ -534,7 +548,7 @@ public partial class StreamingService
             // HLS confermata funzionante sulla TV vera, non toccarla senza riverificare).
             if (!asHls) { args.Add("-avoid_negative_ts"); args.Add("disabled"); }
 
-            var vf = BuildVideoFilter(probe.Is10Bit, probe.IsHdr, scaleFilter);
+            var vf = BuildVideoFilter(probe.Is10Bit, probe.IsHdr, scaleFilter, attemptGpuTonemap);
             if (vf is not null) { args.Add("-vf"); args.Add(vf); }
 
             args.Add("-c:v"); args.Add(encoderName);
@@ -689,29 +703,47 @@ public partial class StreamingService
         args.Add("playlist.m3u8");
     }
 
-    private static string? BuildVideoFilter(bool is10Bit, bool isHdr, string? scaleFilter)
+    private static string? BuildVideoFilter(bool is10Bit, bool isHdr, string? scaleFilter, bool useGpuTonemap = false)
     {
         var parts = new List<string>();
 
         if (isHdr)
         {
-            // BUG REALE DI PERFORMANCE trovato misurando il throughput reale dello streaming
-            // (curl con -w "%{time_total}", confrontato con la durata di contenuto prodotta
-            // contando i frammenti fMP4): a piena risoluzione 4K questa catena di filtri CPU
-            // (zscale+tonemap, non accelerata da NVENC) codifica a ~0.48x tempo reale — il buffer
-            // lato player si scarica più svelto di quanto il server lo riempia, causando lo scatto
-            // periodico ogni ~2s (un GOP) osservato in streaming. La scala va applicata PRIMA del
-            // tonemap, non dopo come faceva prima (sprecava lavoro CPU tonemappando a piena
-            // risoluzione anche per qualità "media"/"bassa" già pensate per uno scale minore): il
-            // costo per pixel di zscale/tonemap cala con il quadrato del fattore di riduzione. Per
-            // "alta" (nessuno scale esplicito) applichiamo comunque un cap a 1080p SOLO qui, solo
-            // per l'HDR — il contenuto SDR nativo non ha questo collo di bottiglia e resta senza cap.
-            var hdrScale = scaleFilter ?? "scale=-2:'min(1080,ih)'";
-            parts.Add(hdrScale);
-            // Tone-mapping HDR (PQ/HLG) -> SDR: senza questo filtro l'immagine risulta più piatta e
-            // con tinta sbagliata (calda/verdastra invece che quella voluta dalla color grading
-            // originale) — confermato su una scena scura reale, vedi ottavo prototipo nel piano.
-            parts.Add("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p");
+            if (useGpuTonemap)
+            {
+                // docs/piano-tonemap-gpu.md, Fase 1 validata (2026-09-16, Lioness S03E07 4K
+                // HDR/DV): libplacebo su Vulkan al posto di zscale/tonemap CPU — stesso colore
+                // (PSNR ~46dB/SSIM ~0.98 contro la catena CPU sulla stessa scena scura) ma +55-57%
+                // di velocità di crociera, perché il frame resta su GPU dal decode ("-hwaccel
+                // vulkan", sopra) fino a subito prima di NVENC, senza mai passare da RAM di
+                // sistema. La scala usa i parametri w=/h= di libplacebo stesso (GPU-side) invece
+                // di un filtro "scale=" CPU separato prima dell'upload — vanificherebbe il punto.
+                // "format=yuv420p" dentro libplacebo E dopo "hwdownload" non è ridondanza voluta:
+                // senza il secondo, questa build ffmpeg (9.0.1) fallisce a negoziare il formato di
+                // scaricamento con un errore criptico ("Invalid output format monob").
+                var heightExpr = ExtractScaleHeightExpr(scaleFilter);
+                parts.Add($"libplacebo=w=-2:h='{heightExpr}':tonemapping=hable:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p,hwdownload,format=yuv420p");
+            }
+            else
+            {
+                // BUG REALE DI PERFORMANCE trovato misurando il throughput reale dello streaming
+                // (curl con -w "%{time_total}", confrontato con la durata di contenuto prodotta
+                // contando i frammenti fMP4): a piena risoluzione 4K questa catena di filtri CPU
+                // (zscale+tonemap, non accelerata da NVENC) codifica a ~0.48x tempo reale — il buffer
+                // lato player si scarica più svelto di quanto il server lo riempia, causando lo scatto
+                // periodico ogni ~2s (un GOP) osservato in streaming. La scala va applicata PRIMA del
+                // tonemap, non dopo come faceva prima (sprecava lavoro CPU tonemappando a piena
+                // risoluzione anche per qualità "media"/"bassa" già pensate per uno scale minore): il
+                // costo per pixel di zscale/tonemap cala con il quadrato del fattore di riduzione. Per
+                // "alta" (nessuno scale esplicito) applichiamo comunque un cap a 1080p SOLO qui, solo
+                // per l'HDR — il contenuto SDR nativo non ha questo collo di bottiglia e resta senza cap.
+                var hdrScale = scaleFilter ?? "scale=-2:'min(1080,ih)'";
+                parts.Add(hdrScale);
+                // Tone-mapping HDR (PQ/HLG) -> SDR: senza questo filtro l'immagine risulta più piatta e
+                // con tinta sbagliata (calda/verdastra invece che quella voluta dalla color grading
+                // originale) — confermato su una scena scura reale, vedi ottavo prototipo nel piano.
+                parts.Add("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p");
+            }
         }
         else if (is10Bit)
         {
@@ -727,6 +759,18 @@ public partial class StreamingService
         }
 
         return parts.Count == 0 ? null : string.Join(",", parts);
+    }
+
+    // QualityPreset produce sempre "scale=-2:'<espressione-altezza>'" oppure null (mai altro
+    // formato, vedi sotto) — qui estraiamo solo l'espressione tra apici per passarla a libplacebo
+    // (parametro h=), che scala già su GPU: un secondo "scale=" CPU prima dell'hwupload
+    // vanificherebbe il punto del ramo GPU tonemap in BuildVideoFilter.
+    private static string ExtractScaleHeightExpr(string? scaleFilter)
+    {
+        if (scaleFilter is null) return "min(1080,ih)";
+        var start = scaleFilter.IndexOf('\'') + 1;
+        var end = scaleFilter.LastIndexOf('\'');
+        return scaleFilter[start..end];
     }
 
     // Cap di risoluzione (solo verso il basso, mai upscale) + parametro di qualità costante per
@@ -1117,6 +1161,11 @@ public partial class StreamingService
         var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: pipePauseBytes, resumeWriterThreshold: pipeResumeBytes));
         var sessionCts = new CancellationTokenSource();
 
+        // docs/piano-tonemap-gpu.md, Fase 2: eleggibile al tone-mapping HDR su GPU (stesso encoder
+        // di entrambi i tentativi sotto, prima dell'eventuale ripiego su libx264) — usato solo per
+        // sapere se il rung di fallback dedicato qui sotto ha senso di scattare.
+        var canUseGpuTonemap = probe.IsHdr && (encoderName == "h264_nvenc" || encoderName == "hevc_nvenc");
+
         var args = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: isCopyMode, forceEncode, audioIndex);
         streamLog.Log($"ffmpeg {string.Join(' ', args)}");
         var (outcome, process, producerTask) = await StartFfmpegProducerAsync(ffmpegPath, args, pipe.Writer, sessionCts.Token, streamLog);
@@ -1128,6 +1177,20 @@ public partial class StreamingService
             var forcedArgs = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: false, forceEncode, audioIndex);
             streamLog.Log($"ffmpeg (retry, trascodifica forzata) {string.Join(' ', forcedArgs)}");
             (outcome, process, producerTask) = await StartFfmpegProducerAsync(ffmpegPath, forcedArgs, pipe.Writer, sessionCts.Token, streamLog);
+        }
+
+        // Fallback automatico (piano-tonemap-gpu.md, Fase 2): se il tone-mapping GPU (libplacebo/
+        // Vulkan, tentato di default sopra per l'HDR su NVENC) fallisce ad aprirsi — es. Vulkan
+        // assente o driver non funzionante su una macchina diversa da questa — ripiega sulla
+        // catena CPU (zscale/tonemap) SENZA rinunciare a NVENC, prima del rung successivo che
+        // rinuncerebbe anche a quello passando a libx264 software.
+        if (outcome == RunResult.FailedBeforeAnyBytes && canUseGpuTonemap)
+        {
+            _log.LogWarning("⚠️ Tone-mapping HDR su GPU (libplacebo/Vulkan) fallito ad aprirsi, ripiego sulla catena CPU");
+            streamLog.Log("⚠️ tone-mapping GPU fallito ad aprirsi, ripiego sulla catena CPU (zscale/tonemap) per l'HDR");
+            var cpuTonemapArgs = BuildStreamArgs(directUrl, startSeconds, probe, quality, encoderName, tryVideoCopy: false, forceEncode, audioIndex, useGpuTonemap: false);
+            streamLog.Log($"ffmpeg (retry, tonemap CPU) {string.Join(' ', cpuTonemapArgs)}");
+            (outcome, process, producerTask) = await StartFfmpegProducerAsync(ffmpegPath, cpuTonemapArgs, pipe.Writer, sessionCts.Token, streamLog);
         }
 
         if (outcome == RunResult.FailedBeforeAnyBytes && !string.Equals(encoderName, "libx264", StringComparison.OrdinalIgnoreCase))
