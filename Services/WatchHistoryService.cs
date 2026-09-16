@@ -141,6 +141,26 @@ public class WatchHistoryService
         }
     }
 
+    // Segna un film/episodio come visto A MANO, senza che sia mai stato riprodotto per davvero
+    // (idea utente 2026-09-16) — a differenza di SaveProgress, qui Completed è impostato
+    // esplicitamente, non ricavato da PositionSeconds/DurationSeconds (che potrebbero non essere
+    // mai stati noti, se il file non è mai stato aperto in questa app).
+    public void MarkWatched(string mediaType, int tmdbId, string title, int? season, int? episode)
+    {
+        var key = KeyFor(mediaType, tmdbId, season, episode);
+        lock (_lock)
+        {
+            if (!_entries.TryGetValue(key, out var entry))
+            {
+                entry = new WatchProgressEntry { TmdbId = tmdbId, MediaType = mediaType, Title = title, Season = season, Episode = episode };
+                _entries[key] = entry;
+            }
+            entry.Completed = true;
+            entry.UpdatedAt = DateTimeOffset.UtcNow;
+            SaveToDisk();
+        }
+    }
+
     public List<WatchProgressEntry> GetShowHistory(int tmdbId)
     {
         lock (_lock)

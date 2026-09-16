@@ -43,7 +43,11 @@
 
       <div class="setup-tab-panel" data-tab="connection">
         <p class="hint">Cerca automaticamente il PC che fa girare Send2Plex sulla rete locale, oppure inserisci l'indirizzo a mano (es. <code>192.168.1.160:5075</code>).</p>
-        <button id="setup-scan" class="tile tile-small" tabindex="0">🔍 Cerca sulla rete locale</button>
+        <!-- span wrapper: ".tile" è "flex-direction:column" (icona sopra/testo sotto, pensato per
+             le tile a griglia) — senza un unico contenitore, icona SVG e testo diventerebbero due
+             elementi flex separati impilati in verticale invece che affiancati (bug reale trovato
+             2026-09-16, vedi iconLabel() in app.js per i pulsanti costruiti da JS). -->
+        <button id="setup-scan" class="tile tile-small" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Cerca sulla rete locale</span></span></button>
         <input id="setup-host" class="field" type="text" placeholder="192.168.1.160:5075" tabindex="0" />
       </div>
 
@@ -92,19 +96,19 @@
   <section id="view-home" class="view view-with-icon-rail hidden">
     <form id="home-search-form" class="search-row">
       <input id="home-search-input" class="field" type="text" placeholder="Titolo film o serie…" tabindex="0" />
-      <button type="submit" class="tile tile-primary search-go" tabindex="0">🔍 Cerca</button>
+      <button type="submit" class="tile tile-primary search-go" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Cerca</span></span></button>
     </form>
     <div class="rails">
       <div id="continue-movies-section" class="hidden">
-        <h3 class="rail-heading">▶️ Continua a guardare — Film</h3>
+        <h3 class="rail-heading"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" stroke="none" aria-hidden="true" style="vertical-align:-3px;margin-right:7px"><path d="M6 5l8 7-8 7V5z"/></svg>Continua a guardare — Film</h3>
         <div id="continue-movies-rail" class="rail"></div>
       </div>
       <div id="continue-tv-section" class="hidden">
-        <h3 class="rail-heading">▶️ Continua a guardare — Serie</h3>
+        <h3 class="rail-heading"><svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" stroke="none" aria-hidden="true" style="vertical-align:-3px;margin-right:7px"><path d="M6 5l8 7-8 7V5z"/></svg>Continua a guardare — Serie</h3>
         <div id="continue-tv-rail" class="rail"></div>
       </div>
       <div id="watchlist-section" class="hidden">
-        <h3 class="rail-heading">📋 La tua Watchlist</h3>
+        <h3 class="rail-heading"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px;margin-right:7px"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>La tua Watchlist</h3>
         <div id="watchlist-rail" class="rail"></div>
       </div>
     </div>
@@ -147,7 +151,7 @@
       <button id="plex-library-back" class="tile tile-small" tabindex="0">← Indietro</button>
       <h2 class="topbar-title">Libreria</h2>
       <div class="topbar-actions">
-        <button id="plex-library-tab-plex" class="tile tile-small tile-primary" tabindex="0">📀 Plex</button>
+        <button id="plex-library-tab-plex" class="tile tile-small tile-primary" tabindex="0"><img class="chip-icon" src="assets/provider/plex.png" alt="">Plex</button>
         <button id="plex-library-tab-premiumize" class="tile tile-small" tabindex="0"><img class="chip-icon" src="assets/provider/premiumizeme.png" alt="">Premiumize</button>
         <button id="plex-library-refresh" class="tile tile-small" tabindex="0">🔄 Aggiorna</button>
       </div>
@@ -158,8 +162,12 @@
          ricerca non ha senso mentre si sfoglia Premiumize (righe reali di cartelle/file, non
          l'elenco Plex già in memoria): nascosta in quel caso da plex-library-tab-premiumize sotto. -->
     <div class="search-row" style="padding:8px 24px 0;">
-      <button id="plex-library-type-movie" class="tile tile-small tile-primary" tabindex="0">🎬 Film</button>
-      <button id="plex-library-type-tv" class="tile tile-small" tabindex="0">📺 Serie</button>
+      <!-- Stesse icone SVG già scelte per la rail di navigazione (buildIconRail in app.js) — non i
+           PNG in assets/icons/ (film.png/serietv.png): illustrazioni clipart dettagliate e a
+           colori, una con filigrana "dreamstime" visibile, inadatte a un'icona piccola coerente
+           col resto dell'app (decisione utente 2026-09-16). -->
+      <button id="plex-library-type-movie" class="tile tile-small tile-primary" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><rect x="2" y="2" width="20" height="20" rx="2.2"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg><span>Film</span></span></button>
+      <button id="plex-library-type-tv" class="tile tile-small" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg><span>Serie</span></span></button>
       <input id="plex-library-search-input" class="field" type="text" placeholder="Cerca nella libreria…" tabindex="0" />
     </div>
     <!-- Sfoglio diretto cartelle Premiumize (docs/piano-premiumize-libreria.md): breadcrumb per
@@ -208,7 +216,7 @@
     </header>
     <form id="search-form" class="search-row">
       <input id="search-input" class="field" type="text" placeholder="Titolo film o serie…" tabindex="0" />
-      <button id="search-go" type="submit" class="tile tile-primary search-go" tabindex="0">🔍 Cerca</button>
+      <button id="search-go" type="submit" class="tile tile-primary search-go" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Cerca</span></span></button>
     </form>
     <div id="search-status" class="hint"></div>
     <div id="search-grid" class="grid poster-grid" data-cols="5"></div>
@@ -234,6 +242,11 @@
           <div id="detail-meta" class="detail-meta"></div>
           <p id="detail-cast" class="detail-cast hidden"></p>
           <button id="detail-watchlist-btn" class="tile tile-small detail-watchlist-btn" tabindex="0">☆ Aggiungi alla Watchlist</button>
+          <!-- Idea utente 2026-09-16: segnare un film come già visto senza doverlo riprodurre per
+               davvero (es. visto altrove) — solo film per ora, vedi setupMarkWatchedButton() in
+               app.js. Nascosto per le serie (il toggle per singolo episodio è un follow-up
+               separato, la riga episodio è già un intero <button>, più delicato da estendere). -->
+          <button id="detail-watched-btn" class="tile tile-small hidden" tabindex="0">✓ Segna come visto</button>
           <p id="detail-overview" class="detail-overview"></p>
           <div id="detail-action"></div>
           <!-- Barra di progresso download in corso per questo titolo (richiesta utente) — popolata
@@ -254,7 +267,7 @@
       <div class="topbar-actions">
         <!-- Confronto Torrentio/libreria Plex (richiesta utente): visibile solo se mancano
              davvero episodi rispetto a quelli già su Plex, vedi renderEpisodeList in app.js. -->
-        <button id="results-download-missing" class="tile tile-small hidden" tabindex="0">⬇️ Episodi mancanti</button>
+        <button id="results-download-missing" class="tile tile-small hidden" tabindex="0"><span style="display:inline-flex;align-items:center;gap:7px"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span>Episodi mancanti</span></span></button>
       </div>
     </header>
     <div class="results-hero-mini">
@@ -426,7 +439,7 @@
       <button id="skip-intro-pill" class="corner-pill hidden" tabindex="0">
         <div id="skip-intro-pill-fill" class="corner-pill-fill"></div>
         <div class="corner-pill-body">
-          <div class="corner-pill-label">⏭️ Salta sigla</div>
+          <div class="corner-pill-label"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px;margin-right:7px"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>Salta sigla</div>
         </div>
       </button>
       <button id="next-episode-pill" class="corner-pill hidden" tabindex="0">

@@ -836,7 +836,11 @@ let categoryRailCounter = 0;
 // già usato per i rail statici della vecchia home — nessuna modifica a quelle due funzioni).
 // iconSrc opzionale: icona ufficiale del servizio (richiesta utente, al posto dell'emoji colorata)
 // — messa PRIMA del testo nello stesso <h3>, dimensionata via .rail-heading-icon in app.css.
-function buildRailSection(container, headingText, iconSrc) {
+// iconSvgName opzionale (alternativo a iconSrc, non entrambi): nome da RAIL_ICONS per le sezioni
+// senza un logo ufficiale (idea utente 2026-09-16, stessa pulizia emoji→SVG della rail principale
+// — ".rail-heading" è "display:flex" in riga, non colonna, quindi qui non serve lo span wrapper
+// usato invece per i pulsanti ".tile" nel resto dell'app, vedi iconLabel()).
+function buildRailSection(container, headingText, iconSrc, iconSvgName) {
   const heading = document.createElement('h3');
   heading.className = 'rail-heading';
   if (iconSrc) {
@@ -845,6 +849,8 @@ function buildRailSection(container, headingText, iconSrc) {
     icon.src = iconSrc;
     icon.alt = '';
     heading.appendChild(icon);
+  } else if (iconSvgName) {
+    heading.insertAdjacentHTML('beforeend', railIcon(iconSvgName));
   }
   heading.appendChild(document.createTextNode(headingText));
   const rail = document.createElement('div');
@@ -855,19 +861,27 @@ function buildRailSection(container, headingText, iconSrc) {
   return rail.id;
 }
 
-const CATEGORY_TITLES = { movies: '🎬 Film', tv: '📺 Serie TV', genres: '🎭 Generi', streaming: '📡 In streaming' };
+// Nome icona RAIL_ICONS per ciascuna categoria (idea utente 2026-09-16) — stessa icona già scelta
+// per la voce corrispondente della rail di navigazione principale, coerenza tra le due.
+const CATEGORY_TITLES = {
+  movies: { text: 'Film', icon: 'film' },
+  tv: { text: 'Serie TV', icon: 'tv' },
+  genres: { text: 'Generi', icon: 'grid' },
+  streaming: { text: 'In streaming', icon: 'broadcast' }
+};
 
 function openCategory(category) {
   pushView('category');
-  document.getElementById('category-title').textContent = CATEGORY_TITLES[category] || '';
+  const titleInfo = CATEGORY_TITLES[category];
+  document.getElementById('category-title').innerHTML = titleInfo ? railIcon(titleInfo.icon) + titleInfo.text : '';
   const body = document.getElementById('category-body');
   body.innerHTML = '';
 
   if (category === 'movies') {
-    loadTrendingRail('movie', buildRailSection(body, '🎬 Film di tendenza'));
-    loadListRail('movie', 'now_playing', buildRailSection(body, '🎦 Al cinema ora'));
-    loadListRail('movie', 'top_rated', buildRailSection(body, '⭐ I più votati'));
-    loadListRail('movie', 'upcoming', buildRailSection(body, '📅 In arrivo'));
+    loadTrendingRail('movie', buildRailSection(body, 'Film di tendenza', null, 'film'));
+    loadListRail('movie', 'now_playing', buildRailSection(body, 'Al cinema ora', null, 'film'));
+    loadListRail('movie', 'top_rated', buildRailSection(body, 'I più votati', null, 'star'));
+    loadListRail('movie', 'upcoming', buildRailSection(body, 'In arrivo', null, 'calendar'));
   } else if (category === 'tv') {
     loadTrendingRail('tv', buildRailSection(body, '📺 Serie di tendenza'));
     loadListRail('tv', 'airing_today', buildRailSection(body, '📡 In onda oggi'));
@@ -898,21 +912,90 @@ document.getElementById('category-back').addEventListener('click', handleBack);
 // "la rail dentro la view corrente", quindi funzionano automaticamente su ogni copia.
 // ---------------------------------------------------------------
 
+// Icone SVG (idea utente 2026-09-16, idee-miglioramento-webos.md) invece degli emoji Unicode:
+// stessa causa già trovata per i controlli del player — i browser ignorano sempre "color" sulle
+// emoji a colori native, il font di sistema disegna la sua forma già colorata a prescindere dal
+// CSS, quindi non erano mai davvero ricolorabili né uniformi con lo stile del resto dell'app.
+// Set scelto in stile Feather Icons (licenza MIT, forme geometriche generiche): stroke-based,
+// "currentColor" per ereditare il colore del testo/focus come qualunque altro elemento — stessa
+// convenzione già stabilita per le icone del player (vedi index.html, controls-row).
+const RAIL_ICONS = {
+  home: '<path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/>',
+  film: '<rect x="2" y="2" width="20" height="20" rx="2.2"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/>',
+  tv: '<rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
+  book: '<path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/>',
+  broadcast: '<path d="M5 12.55a11 11 0 0114.08 0"/><path d="M1.42 9a16 16 0 0121.16 0"/><path d="M8.53 16.11a6 6 0 016.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
+  inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>',
+  download: '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  settings: '<path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>',
+  star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'
+};
+
+function railIcon(name) {
+  return `<svg class="rail-ic-svg" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${RAIL_ICONS[name]}</svg>`;
+}
+
+// Stesso principio di RAIL_ICONS/railIcon() sopra, ma per le icone dentro un pulsante testo+icona
+// ("▶️ Riprendi", "🔍 Cerca", "💾 Guarda da disco", "⬇️ Scarica"…) invece che da sole in una cella
+// della rail — richiesta utente 2026-09-16, estensione della stessa pulizia emoji→SVG. "play" è un
+// triangolo pieno (fill), non uno stroke: stessa forma già usata per l'icona "Prossimo episodio"
+// nei controlli del player (index.html), riusata qui per coerenza visiva in tutta l'app.
+const INLINE_ICONS = {
+  play: { fill: '<path d="M6 5l8 7-8 7V5z"/>' },
+  search: { stroke: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>' },
+  save: { stroke: '<path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>' },
+  download: { stroke: '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>' },
+  bookmark: { stroke: '<path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>' }
+};
+
+// bare=true: nessun margine a destra, per un pulsante SOLO icona (es. il tasto "Scarica su Plex"
+// nella lista versioni) invece che icona+testo.
+function inlineIcon(name, size = 16, bare = false) {
+  const def = INLINE_ICONS[name];
+  if (!def) return '';
+  const attrs = def.fill
+    ? 'fill="currentColor" stroke="none"'
+    : 'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+  const margin = bare ? '' : 'margin-right:7px;';
+  return `<svg viewBox="0 0 24 24" width="${size}" height="${size}" ${attrs} aria-hidden="true" style="vertical-align:-3px;${margin}">${def.fill || def.stroke}</svg>`;
+}
+
+// BUG REALE (2026-09-16): ".tile" è "display:flex;flex-direction:column" (icona sopra, testo
+// sotto — pensato per le tile a griglia) — assegnando "inlineIcon(...) + testo" direttamente come
+// .innerHTML di un .tile, l'SVG e il testo diventano DUE elementi flex separati e finiscono
+// impilati in verticale invece che affiancati (l'icona, alta 16px, spariva schiacciata sopra il
+// testo). Un unico <span> wrapper attorno a icona+testo li rende UN solo elemento flex per il
+// contenitore esterno — dentro lo span, l'SVG (inline) e il testo restano naturalmente sulla
+// stessa riga.
+function iconLabel(name, text, size = 16) {
+  // BUG REALE (2026-09-16): "white-space:nowrap" qui forzava tutta l'etichetta (icona+testo) su
+  // una riga sola — per i testi dinamici lunghi ("Riprendi: S3E7 · Bacia le ragazze (10 min
+  // rimasti)") il contenuto usciva dai bordi del pulsante invece di andare a capo come faceva il
+  // solo testo prima. L'icona resta a dimensione fissa (flex-shrink:0), il testo può avvolgersi su
+  // più righe normalmente.
+  // align-items:flex-start (non "center"): con testo lungo che va a capo su più righe, "center"
+  // metterebbe l'icona a metà del blocco di testo (es. accanto alla seconda riga) invece che
+  // accanto alla prima parola — meno naturale da leggere.
+  return `<span style="display:inline-flex;align-items:flex-start;gap:7px"><span style="flex-shrink:0;padding-top:2px">${inlineIcon(name, size, true)}</span><span>${text}</span></span>`;
+}
+
 function buildIconRail() {
   const nav = document.createElement('nav');
   nav.className = 'icon-rail';
   nav.innerHTML = `
     <div class="rail-brand"><img class="rail-brand-mark" src="assets/logo.png" alt="" /><span class="rail-label rail-wordmark">NimbusFX</span></div>
-    <button class="tile tile-small rail-item" data-rail-action="home" tabindex="0"><span class="rail-ic">🏠</span><span class="rail-label">Home</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="category:movies" tabindex="0"><span class="rail-ic">🎬</span><span class="rail-label">Film</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="category:tv" tabindex="0"><span class="rail-ic">📺</span><span class="rail-label">Serie TV</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="category:genres" tabindex="0"><span class="rail-ic">🎭</span><span class="rail-label">Generi</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="plex-library" tabindex="0"><span class="rail-ic">📚</span><span class="rail-label">Libreria</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="category:streaming" tabindex="0"><span class="rail-ic">📡</span><span class="rail-label">In streaming</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="home" tabindex="0"><span class="rail-ic">${railIcon('home')}</span><span class="rail-label">Home</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="category:movies" tabindex="0"><span class="rail-ic">${railIcon('film')}</span><span class="rail-label">Film</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="category:tv" tabindex="0"><span class="rail-ic">${railIcon('tv')}</span><span class="rail-label">Serie TV</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="category:genres" tabindex="0"><span class="rail-ic">${railIcon('grid')}</span><span class="rail-label">Generi</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="plex-library" tabindex="0"><span class="rail-ic">${railIcon('book')}</span><span class="rail-label">Libreria</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="category:streaming" tabindex="0"><span class="rail-ic">${railIcon('broadcast')}</span><span class="rail-label">In streaming</span></button>
     <div class="rail-sep"></div>
-    <button class="tile tile-small rail-item" data-rail-action="library" tabindex="0"><span class="rail-ic">📥</span><span class="rail-label">Providers</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="downloads" tabindex="0"><span class="rail-ic">⬇️</span><span class="rail-label">Download</span></button>
-    <button class="tile tile-small rail-item" data-rail-action="settings" tabindex="0"><span class="rail-ic">⚙️</span><span class="rail-label">Impostazioni</span></button>`;
+    <button class="tile tile-small rail-item" data-rail-action="library" tabindex="0"><span class="rail-ic">${railIcon('inbox')}</span><span class="rail-label">Providers</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="downloads" tabindex="0"><span class="rail-ic">${railIcon('download')}</span><span class="rail-label">Download</span></button>
+    <button class="tile tile-small rail-item" data-rail-action="settings" tabindex="0"><span class="rail-ic">${railIcon('settings')}</span><span class="rail-label">Impostazioni</span></button>`;
   return nav;
 }
 
@@ -2036,6 +2119,38 @@ function updateWatchlistButtonLabel(btn, saved) {
   btn.classList.toggle('tile-primary', saved);
 }
 
+// Idea utente 2026-09-16: segnare un film come già visto senza doverlo riprodurre per davvero (es.
+// visto altrove, prima di usare quest'app) — così "Continua a guardare" non lo propone più. Solo
+// film per ora (vedi commento su #detail-watched-btn in index.html). "watched=false" rimuove del
+// tutto la voce di cronologia (RemoveProgress lato server): un film "visto" non ha comunque una
+// posizione di ripresa significativa da preservare.
+async function setupMarkWatchedButton(candidate) {
+  const btn = document.getElementById('detail-watched-btn');
+  if (candidate.mediaType !== 'movie') { btn.classList.add('hidden'); return; }
+  btn.classList.remove('hidden');
+
+  let watched = false;
+  try {
+    const res = await fetch(`${apiBase()}/api/tv/history/watched-status?tmdbId=${candidate.tmdbId}&mediaType=movie`);
+    const data = await res.json();
+    watched = !!data.completed;
+  } catch { /* in dubbio: mostra "segna come visto", l'utente può comunque provare a togglare */ }
+
+  updateMarkWatchedButtonLabel(btn, watched);
+  btn.onclick = async () => {
+    try {
+      await fetch(`${apiBase()}/api/tv/history/mark-watched?tmdbId=${candidate.tmdbId}&mediaType=movie&title=${encodeURIComponent(candidate.title)}&watched=${!watched}`, { method: 'POST' });
+      watched = !watched;
+      updateMarkWatchedButtonLabel(btn, watched);
+    } catch { /* best-effort: il pulsante resta nello stato precedente se la chiamata fallisce */ }
+  };
+}
+
+function updateMarkWatchedButtonLabel(btn, watched) {
+  btn.textContent = watched ? '↺ Segna come non visto' : '✓ Segna come visto';
+  btn.classList.toggle('tile-primary', watched);
+}
+
 async function renderDetail(detail, candidate, watchedEpisodes) {
   document.getElementById('detail-status').textContent = '';
   document.getElementById('detail-body').classList.remove('hidden');
@@ -2074,6 +2189,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
   }
 
   setupWatchlistButton(candidate);
+  setupMarkWatchedButton(candidate);
 
   const actionEl = document.getElementById('detail-action');
   actionEl.innerHTML = '';
@@ -2097,7 +2213,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       resumeBtn.className = 'tile tile-primary';
       resumeBtn.tabIndex = 0;
       const remaining = formatRemaining(resume.positionSeconds, resume.durationSeconds);
-      resumeBtn.textContent = `▶️ Riprendi${remaining ? ` — ${remaining}` : ''}`;
+      resumeBtn.innerHTML = iconLabel('play', `Riprendi${remaining ? ` — ${remaining}` : ''}`);
       const ctx = { tmdbId: candidate.tmdbId, mediaType: 'movie', season: null, episode: null, title: candidate.title };
       resumeBtn.addEventListener('click', () => {
         if (local && local.hasLocalFile) openLocalPlayer(local.localFilePath, title, ctx, resume.positionSeconds);
@@ -2110,7 +2226,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
     if (resume) btn.style.marginTop = '12px';
     btn.tabIndex = 0;
     if (local && local.hasLocalFile) {
-      btn.textContent = '💾 Guarda da disco';
+      btn.innerHTML = iconLabel('save', 'Guarda da disco');
       btn.addEventListener('click', () => openLocalPlayer(local.localFilePath, title, { tmdbId: candidate.tmdbId, mediaType: 'movie', season: null, episode: null, title: candidate.title }));
       actionEl.appendChild(btn);
       // Richiesta utente (2026-09-16): il file locale non deve essere l'unica opzione — es. per
@@ -2121,11 +2237,11 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       searchBtn.className = 'tile tile-small';
       searchBtn.style.marginTop = '12px';
       searchBtn.tabIndex = 0;
-      searchBtn.textContent = '🔎 Cerca comunque online';
+      searchBtn.innerHTML = iconLabel('search', 'Cerca comunque online');
       searchBtn.addEventListener('click', () => openMovieResults({ tmdbId: candidate.tmdbId, mediaType: 'movie' }, title, candidate.title));
       actionEl.appendChild(searchBtn);
     } else {
-      btn.textContent = '▶️ Guarda';
+      btn.innerHTML = iconLabel('play', 'Guarda');
       btn.addEventListener('click', () => openMovieResults({ tmdbId: candidate.tmdbId, mediaType: 'movie' }, title, candidate.title));
       actionEl.appendChild(btn);
       if (local && local.inPlexLibrary) {
@@ -2147,7 +2263,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       resumeBtn.tabIndex = 0;
       resumeBtn.style.marginBottom = '24px';
       const remaining = formatRemaining(resume.positionSeconds, resume.durationSeconds);
-      resumeBtn.textContent = `▶️ Riprendi — S${resume.season}E${resume.episode}${remaining ? ` (${remaining})` : ''}`;
+      resumeBtn.innerHTML = iconLabel('play', `Riprendi — S${resume.season}E${resume.episode}${remaining ? ` (${remaining})` : ''}`);
       const ctx = { tmdbId: candidate.tmdbId, mediaType: 'tv', season: resume.season, episode: resume.episode, title: candidate.title };
       resumeBtn.addEventListener('click', async () => {
         const resumeLocal = await fetchLocalStatus('tv', candidate.title, resume.season, resume.episode);
@@ -2156,7 +2272,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       });
       actionEl.appendChild(resumeBtn);
       fetchEpisodeTitle(candidate.tmdbId, resume.season, resume.episode).then(name => {
-        if (name) resumeBtn.textContent = `▶️ Riprendi: S${resume.season}E${resume.episode} · ${name}${remaining ? ` (${remaining})` : ''}`;
+        if (name) resumeBtn.innerHTML = iconLabel('play', `Riprendi: S${resume.season}E${resume.episode} · ${name}${remaining ? ` (${remaining})` : ''}`);
       });
     }
     const nextEpisode = resume ? null : computeNextEpisode(seasons, watchedEpisodes);
@@ -2165,23 +2281,23 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       nextBtn.className = 'tile tile-primary';
       nextBtn.tabIndex = 0;
       nextBtn.style.marginBottom = '24px';
-      nextBtn.textContent = `▶️ Prossimo episodio — S${nextEpisode.season}E${nextEpisode.episode}`;
+      nextBtn.innerHTML = iconLabel('play', `Prossimo episodio — S${nextEpisode.season}E${nextEpisode.episode}`);
       actionEl.appendChild(nextBtn);
 
       // Stesso principio del ramo film sopra: da disco se già posseduto, mai una ricerca torrent
       // per un episodio che è già lì.
       const nextLocal = await fetchLocalStatus('tv', candidate.title, nextEpisode.season, nextEpisode.episode);
       const isLocal = nextLocal && nextLocal.hasLocalFile;
-      const icon = isLocal ? '💾' : '▶️';
+      const iconName = isLocal ? 'save' : 'play';
       if (isLocal) {
-        nextBtn.textContent = `💾 Prossimo episodio — S${nextEpisode.season}E${nextEpisode.episode} (da disco)`;
+        nextBtn.innerHTML = iconLabel('save', `Prossimo episodio — S${nextEpisode.season}E${nextEpisode.episode} (da disco)`);
         nextBtn.addEventListener('click', () => openLocalPlayer(nextLocal.localFilePath, `${candidate.title} — S${nextEpisode.season}E${nextEpisode.episode}`, { tmdbId: candidate.tmdbId, mediaType: 'tv', season: nextEpisode.season, episode: nextEpisode.episode, title: candidate.title }));
         // Stesso principio del ramo film sopra: il file locale non deve essere l'unica opzione.
         const searchNextBtn = document.createElement('button');
         searchNextBtn.className = 'tile tile-small';
         searchNextBtn.style.marginBottom = '24px';
         searchNextBtn.tabIndex = 0;
-        searchNextBtn.textContent = '🔎 Cerca comunque online';
+        searchNextBtn.innerHTML = iconLabel('search', 'Cerca comunque online');
         searchNextBtn.addEventListener('click', () => continueToEpisode(candidate, nextEpisode.season, nextEpisode.episode));
         actionEl.appendChild(searchNextBtn);
       } else {
@@ -2190,7 +2306,7 @@ async function renderDetail(detail, candidate, watchedEpisodes) {
       // Titolo vero aggiunto non appena disponibile (non blocca la resa del pulsante/pagina):
       // il fallback "S{n}E{n}" sopra resta finché la chiamata a TMDB non risponde.
       fetchEpisodeTitle(candidate.tmdbId, nextEpisode.season, nextEpisode.episode).then(name => {
-        if (name) nextBtn.textContent = `${icon} Prossimo: S${nextEpisode.season}E${nextEpisode.episode} · ${name}${isLocal ? ' (da disco)' : ''}`;
+        if (name) nextBtn.innerHTML = iconLabel(iconName, `Prossimo: S${nextEpisode.season}E${nextEpisode.episode} · ${name}${isLocal ? ' (da disco)' : ''}`);
       });
     }
     if (seasons.length === 0) {
@@ -2375,7 +2491,7 @@ function setupMissingEpisodesButton(byEpisode, ownedSet, tmdbId, season, seriesT
   }
 
   btn.classList.remove('hidden');
-  btn.textContent = `⬇️ Episodi mancanti (${missing.length})`;
+  btn.innerHTML = iconLabel('download', `Episodi mancanti (${missing.length})`);
   btn.onclick = () => downloadMissingEpisodes(byEpisode, missing, tmdbId, season, seriesTitle, btn);
 }
 
@@ -2472,7 +2588,7 @@ async function checkLocalFileForVersionList(mediaType, cleanTitle, season, episo
   const btn = document.createElement('button');
   btn.className = 'tile tile-small tile-primary';
   btn.tabIndex = 0;
-  btn.textContent = '💾 Guarda da disco (già scaricato)';
+  btn.innerHTML = iconLabel('save', 'Guarda da disco (già scaricato)');
   // currentMediaContext qui è già quello giusto: impostato dal chiamante (openMovieResults/
   // openEpisodeVersions) prima di arrivare a checkLocalFileForVersionList, letto al click (non
   // catturato ora) perché resta lo stesso finché si è su questa pagina.
@@ -2621,7 +2737,7 @@ function renderVersionRows(results, moveFocus) {
     const downloadBtn = document.createElement('button');
     downloadBtn.className = 'tile tile-small result-provider-btn';
     downloadBtn.tabIndex = 0;
-    downloadBtn.textContent = '⬇️';
+    downloadBtn.innerHTML = inlineIcon('download', 16, true);
     downloadBtn.title = 'Scarica su Plex';
     downloadBtn.addEventListener('click', (e) => {
       e.stopPropagation();

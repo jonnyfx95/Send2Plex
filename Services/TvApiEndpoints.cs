@@ -739,6 +739,28 @@ public static class TvApiEndpoints
             return Results.Json(episodes);
         });
 
+        // Stato "visto" per un film, per la scheda (idea utente 2026-09-16) — solo film per ora:
+        // il toggle per singolo episodio richiede una modifica di markup più delicata
+        // (renderEpisodeList in app.js usa già l'intera riga come <button>, annidarci un secondo
+        // controllo rischia di rompere il parsing HTML), lasciata come follow-up separato.
+        group.MapGet("/history/watched-status", (int tmdbId, string mediaType, WatchHistoryService history) =>
+        {
+            var entry = history.TryGet(mediaType, tmdbId, null, null);
+            return Results.Json(new { completed = entry?.Completed ?? false });
+        });
+
+        // Segna/rimuove manualmente lo stato "visto" di un film (idea utente 2026-09-16) — utile
+        // per chi lo ha già visto altrove (altro dispositivo, prima di usare quest'app) e vuole che
+        // "Continua a guardare" non lo proponga. "watched=false" rimuove del tutto la voce
+        // (RemoveProgress): un film segnato "visto" non ha comunque una posizione di ripresa
+        // significativa da preservare.
+        group.MapPost("/history/mark-watched", (int tmdbId, string mediaType, string title, bool watched, WatchHistoryService history) =>
+        {
+            if (watched) history.MarkWatched(mediaType, tmdbId, title, null, null);
+            else history.RemoveProgress(mediaType, tmdbId, null, null);
+            return Results.Json(new { ok = true });
+        });
+
         // Progresso di visione non completato per un titolo, per la scheda (idee-miglioramento-
         // webos.md, 2026-09-16: "Continua a guardare" deve aprire la scheda, non partire subito
         // con la riproduzione — ma la scheda deve comunque offrire "Riprendi" come azione
