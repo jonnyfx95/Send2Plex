@@ -408,6 +408,17 @@ public partial class StreamingService
             firstSegmentTcs.TrySetResult(outcome);
         }, CancellationToken.None);
 
+        // Vedi FirstOutputTimeout in StreamingService.cs: senza questo, un ffmpeg bloccato (nessun
+        // segmento, processo mai uscito — osservato con un link debrid lento/morto) farebbe
+        // attendere firstSegmentTcs per sempre, tenendo occupato _hlsSetupGate (globale, non per
+        // file) e paralizzando ogni streaming successivo, per qualunque file.
+        var timeoutTask = Task.Delay(FirstOutputTimeout, CancellationToken.None);
+        if (await Task.WhenAny(firstSegmentTcs.Task, timeoutTask) == timeoutTask)
+        {
+            streamLog.Log($"⚠️ ffmpeg (HLS) non ha prodotto il primo segmento entro {FirstOutputTimeout.TotalSeconds:n0}s, lo considero bloccato e lo termino");
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            firstSegmentTcs.TrySetResult(RunResult.FailedBeforeAnyBytes);
+        }
         var outcome = await firstSegmentTcs.Task;
         return (outcome, proc);
     }

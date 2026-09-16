@@ -79,6 +79,20 @@ public partial class StreamingService
     // un eventuale riaggancio, prima di essere chiuso per davvero.
     private static readonly TimeSpan SessionDetachGrace = TimeSpan.FromSeconds(30);
 
+    // BUG REALE, IL PIÙ GRAVE TROVATO FINORA (2026-09-16): l'attesa del primo byte/segmento
+    // prodotto da ffmpeg (sia nel pipe MP4 sia in HLS) non aveva NESSUN timeout — un ffmpeg
+    // bloccato (osservato: un link debrid lento/morto su un vecchio rip XviD, ma potrebbe capitare
+    // per qualunque sorgente di rete) restava "vivo ma fermo" per sempre, e la creazione della
+    // sessione (StartFfmpegForHlsAsync/StartFfmpegProducerAsync) non ritornava mai. Poiché questa
+    // attesa avviene DENTRO il semaforo globale di setup (_hlsSetupGate/_sessionSetupGate, UNO
+    // solo per l'intera app, non per file), un singolo streaming bloccato paralizzava TUTTI gli
+    // streaming successivi, per QUALUNQUE file — non un blocco isolato ma un'interruzione totale
+    // del servizio, risolvibile prima d'ora solo riavviando il processo del server. Il valore è
+    // volutamente SOTTO i 25s (STALL_GRACE_FIRST_FRAME_MS lato client, webos-app/app.js) — se il
+    // server si riprende da solo entro quella soglia, il fallback (libx264, o il prossimo tentativo
+    // del client) può ancora farcela prima che il player lato TV rinunci e ritenti a vuoto.
+    private static readonly TimeSpan FirstOutputTimeout = TimeSpan.FromSeconds(20);
+
     // Ampiezza del bucket per l'offset di partenza nella chiave di sessione: due richieste sullo
     // stesso file/qualità entro questa distanza sono considerate "la stessa visione" e riusano la
     // sessione esistente invece di aprirne una nuova.
@@ -1367,6 +1381,16 @@ public partial class StreamingService
             }
         });
 
+        // Vedi FirstOutputTimeout: senza questo, un ffmpeg bloccato (nessun byte, processo mai
+        // uscito) farebbe attendere firstByteTcs per sempre, tenendo occupato _sessionSetupGate e
+        // paralizzando ogni streaming successivo per qualunque file.
+        var timeoutTask = Task.Delay(FirstOutputTimeout, CancellationToken.None);
+        if (await Task.WhenAny(firstByteTcs.Task, timeoutTask) == timeoutTask)
+        {
+            streamLog.Log($"⚠️ ffmpeg non ha prodotto il primo byte entro {FirstOutputTimeout.TotalSeconds:n0}s, lo considero bloccato e lo termino");
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            firstByteTcs.TrySetResult(RunResult.FailedBeforeAnyBytes);
+        }
         var outcome = await firstByteTcs.Task;
         return (outcome, proc, copyTask);
     }
