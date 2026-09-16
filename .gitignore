@@ -53,3 +53,7 @@ Thumbs.db
 # Pacchetto .ipk generato da ares-package per l'app di test WebOS (webos-hevc-test/) —
 # rigenerabile in qualsiasi momento, non va versionato.
 webos-hevc-test-build/
+
+# Pacchetto .ipk generato da ares-package per l'app webOS NimbusFX — rigenerabile in
+# qualsiasi momento (ares-package . -o .), non va versionato.
+webos-app/*.ipk
